@@ -1,5 +1,18 @@
 # 📜 Gatekeeper Bot — Changelog
 
+## v1.3 (2025-09-01)
+**Stability & quality update for lifetime-ban workflow (matching current code).**
+
+### ✅ What’s new
+- **Startup sync with server bans:** imports all existing guild bans into the in-memory lifetime list.
+- **Stronger leave-ban:** uses `guild.members.ban(id)` so the ban still works even after the user leaves.
+- **Commands accept mention or raw ID:** `!ban @user|<id> [reason]`, `!pardon @user|<id> [reason]`.
+- **Readable ban list:** `!banlist` resolves and shows `username#discriminator (ID)` when possible; falls back to `(unknown user)` if Discord can’t fetch.
+- **Large list handling:** auto-splits long `!banlist` output to respect Discord’s 2000-char limit.
+- **Reason logging kept:** default reasons include moderator name when none is provided:
+  - Ban → `Manual ban by <moderator>`
+  - Pardon → `Pardon issued by <moderator>`
+
 ## v1.2
 **Added manual ban, pardon, banlist, and help commands, full reason logging for all bans/pardons + improved logs.**
 
