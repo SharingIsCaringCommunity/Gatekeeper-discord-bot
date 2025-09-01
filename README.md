@@ -1,6 +1,6 @@
 # 📜 Gatekeeper Bot — Changelog
 
-## v1.3 (2025-09-01)
+## v1.2.1 (2025-09-01)
 **Stability & quality update for lifetime-ban workflow (matching current code).**
 
 ### ✅ What’s new
