@@ -1,49 +1,54 @@
 # 📜 Gatekeeper Bot — Changelog
 
+## v1.3.2 (2025-09-10)
+**Command Update**
+
+### ✅ What’s new
+- Replaced the old help command:
+  - ❌ `!help`
+  - ✅ `!gkbot`
+- `!gkbot` now shows the list of all Gatekeeper Bot commands with usage examples.
+- Keeps consistency with the bot name and avoids conflicts with other bots that use `!help`.
+
+---
+
 ## v1.3.1 (2025-09-10)
 **Environment Variables Update (Railway-ready)**
 
-### ✅ What’s new
-- Removed hardcoded token and channel ID from `index.js`.
+- Removed hardcoded token and channel ID.
 - Introduced environment variables:
   - `DISCORD_TOKEN` → your bot token.
-  - `LOG_CHANNEL` → channel ID for logging.
-- Compatible with Railway (or any platform with ENV Vars).
-- Safer for production deployments (no token leaks in code).
+  - `LOG_CHANNEL` → log channel ID.
+- Fully compatible with Railway deployments.
 
 ---
 
 ## v1.3 (2025-09-01)
-**Stability & quality update for lifetime-ban workflow.**
+**Stability & Quality Update**
 
-- Synced lifetime ban list with all server bans on startup.
-- Improved leave-ban reliability with `guild.members.ban(id)` (works even after user leaves).
-- Commands accept mention **or raw ID** (`!ban`, `!pardon`).
-- `!banlist` shows usernames/IDs, auto-splits if too long.
-- Reason logging: default reasons include moderator name.
+- Synced lifetime ban list with server bans on startup.
+- Improved leave-ban reliability.
+- Commands accept mention **or raw ID**.
+- `!banlist` shows usernames/IDs, auto-splits long lists.
+- Reason logging includes moderator name by default.
 
 ---
 
 ## v1.2 (2025-08-27)
 **Command & Logging Update**
 - Added `!ban`, `!pardon`, `!banlist`, `!help`.
-- Full reason logging for bans/pardons.
-- Default reasons:
-  - Ban → *Manual ban by `<moderator>`*.
-  - Pardon → *Pardon issued by `<moderator>`*.
-- Improved moderator confirmations and logs.
+- Reason logging everywhere (default reasons include moderator names).
 
 ---
 
 ## v1.1
-- Improved auto-ban on rejoin (lifetime ban).
+- Improved auto-ban on rejoin.
 - Added join/leave logging.
-- Better error handling for missing permissions.
+- Better error handling.
 
 ---
 
 ## v1.0 (Initial Release)
-- Auto-ban users who leave the server (lifetime ban).
-- Auto-ban if banned users try to rejoin.
-- Basic logging of joins/leaves.
-- Express keep-alive server for 24/7 uptime.
+- Auto-ban on leave/rejoin.
+- Basic join/leave logging.
+- Express keep-alive server for uptime.
