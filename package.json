@@ -1,13 +1,13 @@
 {
   "name": "gatekeeper-bot",
   "version": "1.0.0",
-  "description": "Discord bot with lifetime ban + anti-spam",
   "main": "index.js",
+  "license": "MIT",
+  "dependencies": {
+    "discord.js": "^14.14.1",
+    "express": "^4.18.2"
+  },
   "scripts": {
     "start": "node index.js"
-  },
-  "dependencies": {
-    "discord.js": "^14.15.3",
-    "dotenv": "^16.4.5"
   }
 }
