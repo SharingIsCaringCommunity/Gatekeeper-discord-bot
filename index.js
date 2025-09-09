@@ -2,8 +2,9 @@ const { Client, GatewayIntentBits, PermissionsBitField } = require('discord.js')
 const express = require('express');
 
 // === DISCORD SETTINGS ===
-const TOKEN = "";  // YOUR TOKEN
-const LOG_CHANNEL_ID = ""; // server-logs channel
+// Use environment variables for sensitive info
+const TOKEN = process.env.DISCORD_TOKEN;         // Bot token from Railway Variables
+const LOG_CHANNEL_ID = process.env.LOG_CHANNEL;  // Log channel ID from Railway Variables
 
 // === KEEPALIVE WEB SERVER (for pingers) ===
 const app = express();
@@ -26,7 +27,6 @@ let bannedUsers = new Set();
 
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  // sync with the first (or only) guild the bot is in
   const guild = client.guilds.cache.first();
   if (!guild) {
     console.log('❗ Bot is not in any guild.');
@@ -58,7 +58,7 @@ client.on('guildMemberAdd', async (member) => {
   }
 });
 
-// MEMBER LEAVES → add to lifetime list + ban by ID
+// MEMBER LEAVES
 client.on('guildMemberRemove', async (member) => {
   const guild = member.guild;
   const logChannel = guild.channels.cache.get(LOG_CHANNEL_ID);
@@ -78,28 +78,25 @@ client.on('guildMemberRemove', async (member) => {
 client.on('messageCreate', async (message) => {
   if (!message.guild || message.author.bot) return;
   if (!message.content.startsWith('!')) return;
-  if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return; // staff only
+  if (!message.member.permissions.has(PermissionsBitField.Flags.BanMembers)) return;
 
   const logChannel = message.guild.channels.cache.get(LOG_CHANNEL_ID);
   const parts = message.content.trim().split(/\s+/);
   const cmd = parts.shift().toLowerCase();
 
-  // helper: get raw ID from mention or keep raw
   const extractId = (token) => token?.replace(/[<@!>]/g, '');
 
-  // !ban @user|<id> [reason]
+  // !ban
   if (cmd === '!ban') {
     const token = parts[0];
     if (!token) return message.reply('⚠️ Usage: `!ban @user [reason]` or `!ban <user_id> [reason]`');
 
     const userId = extractId(token);
     const reason = parts.slice(1).join(' ') || `Manual ban by ${message.author.tag}`;
-
     bannedUsers.add(userId);
 
     try {
       await message.guild.members.ban(userId, { reason });
-      // get a nice tag if possible
       let tag = userId;
       try {
         const user = await client.users.fetch(userId);
@@ -113,7 +110,7 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // !pardon @user|<id> [reason]
+  // !pardon
   if (cmd === '!pardon') {
     const token = parts[0];
     if (!token) return message.reply('⚠️ Usage: `!pardon @user [reason]` or `!pardon <user_id> [reason]`');
@@ -132,7 +129,7 @@ client.on('messageCreate', async (message) => {
     }
   }
 
-  // !banlist (shows resolved usernames even if they’re not in guild)
+  // !banlist
   if (cmd === '!banlist') {
     if (bannedUsers.size === 0) return message.reply('📋 No users are in the lifetime ban list.');
 
@@ -149,8 +146,8 @@ client.on('messageCreate', async (message) => {
     }
 
     const header = '📋 **Lifetime Ban List**\n';
-    const chunks = [];
     let buf = header;
+    const chunks = [];
 
     for (const line of lines) {
       if ((buf + line + '\n').length > 1900) {
@@ -167,7 +164,7 @@ client.on('messageCreate', async (message) => {
   }
 
   // !help
-  if (cmd === '!help') {
+  if (cmd === '!gkbot') {
     message.reply(
       "📖 **Gatekeeper Bot Commands**\n" +
       "```\n" +
