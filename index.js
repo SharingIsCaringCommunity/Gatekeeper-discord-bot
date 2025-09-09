@@ -171,7 +171,7 @@ client.on('messageCreate', async (message) => {
       "!ban @user|<id> [reason]    → Ban & add to lifetime ban list\n" +
       "!pardon @user|<id> [reason] → Unban & remove from lifetime ban list\n" +
       "!banlist                    → Show lifetime ban list\n" +
-      "!help                       → Show this help\n" +
+      "gkbot                      → Show this help\n" +
       "```"
     );
   }
