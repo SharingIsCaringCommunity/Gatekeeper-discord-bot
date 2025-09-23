@@ -1,54 +1,73 @@
 # 📜 Gatekeeper Bot — Changelog
 
+## v1.4.1 (2025-09-23)
+**Admin Role Enforcement + Better Errors**
+
+### ✅ What’s new
+- All moderation commands (`!warn`, `!ban`, `!pardon`, `!banlist`) are now **restricted to Admins only** (must have Administrator permission).
+- Regular members can still use:
+  - `!warnings` (to check their own or others’ warnings).
+  - `!gkbot` (help command).
+- Improved error handling:
+  - Clearer message when the bot cannot ban a user due to Discord role hierarchy:
+    > ⚠️ Could not ban this user — check the bot’s role is above theirs.
+
+---
+
+## v1.4.0 (2025-09-23)
+**Warning System Update**
+
+- Added `!warn` command → Admins can warn members (3 warnings = auto-ban).
+- Added `!warnings` command → Members and admins can check warnings.
+- Warnings reset when a user is pardoned.
+- Added `!bannedlist` as alias for `!banlist`.
+
+---
+
 ## v1.3.2 (2025-09-10)
 **Command Update**
 
-### ✅ What’s new
-- Replaced the old help command:
-  - ❌ `!help`
-  - ✅ `!gkbot`
-- `!gkbot` now shows the list of all Gatekeeper Bot commands with usage examples.
-- Keeps consistency with the bot name and avoids conflicts with other bots that use `!help`.
+- Replaced `!help` with `!gkbot` for showing command list.
 
 ---
 
 ## v1.3.1 (2025-09-10)
 **Environment Variables Update (Railway-ready)**
 
-- Removed hardcoded token and channel ID.
-- Introduced environment variables:
-  - `DISCORD_TOKEN` → your bot token.
-  - `LOG_CHANNEL` → log channel ID.
-- Fully compatible with Railway deployments.
+- Moved bot token and log channel ID to environment variables:
+  - `DISCORD_TOKEN`
+  - `LOG_CHANNEL`
+- Safer for production (no hardcoded secrets).
 
 ---
 
 ## v1.3 (2025-09-01)
 **Stability & Quality Update**
 
-- Synced lifetime ban list with server bans on startup.
+- Synced lifetime ban list with existing server bans.
 - Improved leave-ban reliability.
 - Commands accept mention **or raw ID**.
-- `!banlist` shows usernames/IDs, auto-splits long lists.
-- Reason logging includes moderator name by default.
+- `!banlist` resolves usernames/IDs, auto-splits if too long.
+- Default reasons include moderator name.
 
 ---
 
 ## v1.2 (2025-08-27)
 **Command & Logging Update**
 - Added `!ban`, `!pardon`, `!banlist`, `!help`.
-- Reason logging everywhere (default reasons include moderator names).
+- Full reason logging with sensible defaults.
 
 ---
 
 ## v1.1
 - Improved auto-ban on rejoin.
 - Added join/leave logging.
-- Better error handling.
+- Better error output for missing permissions.
 
 ---
 
 ## v1.0 (Initial Release)
-- Auto-ban on leave/rejoin.
+- Auto-ban users who leave (lifetime ban).
+- Auto-ban if banned users rejoin.
 - Basic join/leave logging.
-- Express keep-alive server for uptime.
+- Keep-alive Express server.
