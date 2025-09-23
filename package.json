@@ -1,13 +1,13 @@
 {
   "name": "gatekeeper-bot",
-  "version": "1.0.0",
+  "version": "1.3.0",
+  "description": "Discord moderation bot with lifetime bans and warnings",
   "main": "index.js",
-  "license": "MIT",
+  "scripts": {
+    "start": "node index.js"
+  },
   "dependencies": {
     "discord.js": "^14.14.1",
     "express": "^4.18.2"
-  },
-  "scripts": {
-    "start": "node index.js"
   }
 }
