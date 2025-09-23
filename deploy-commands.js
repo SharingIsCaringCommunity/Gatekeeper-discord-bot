@@ -32,7 +32,6 @@ const commands = [
     .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
   new SlashCommandBuilder().setName('banlist')
     .setDescription('Show all permanently banned users (Admins only)'),
-  // Help command renamed from gkbot → bb
   new SlashCommandBuilder().setName('bb')
     .setDescription('Show BusyPang bot help & commands'),
 ].map(c => c.toJSON());
@@ -40,17 +39,14 @@ const commands = [
 async function run() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-  // 1) Clear GLOBAL (removes the old /gkbot you still see)
   console.log(`🌐 Clearing GLOBAL commands for app ${CLIENT_ID} ...`);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
   console.log('✅ GLOBAL commands cleared.');
 
-  // 2) Clear GUILD
   console.log(`🗺️  Clearing GUILD commands for ${GUILD_ID} ...`);
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
   console.log('✅ GUILD commands cleared.');
 
-  // 3) Deploy fresh to GUILD only
   console.log(`🚀 Deploying ${commands.length} commands to guild ${GUILD_ID} ...`);
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
   console.log('✅ Guild commands deployed (instant).');
