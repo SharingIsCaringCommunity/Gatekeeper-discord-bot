@@ -168,6 +168,25 @@ client.on('messageCreate', async (message) => {
     }
   }
 
+// --- CLEAR WARNS ---
+if (cmd === '!clearwarns') {
+  if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
+    return message.reply("❌ Only admins can clear warnings.");
+  }
+  const token = parts[0];
+  if (!token) return message.reply('⚠️ Usage: `!clearwarns @user [reason]`');
+
+  const userId = extractId(token);
+  const reason = parts.slice(1).join(' ') || `Warnings cleared by ${message.author.tag}`;
+  warnings.delete(userId);
+
+  const user = await client.users.fetch(userId).catch(() => null);
+  const tag = user?.tag || userId;
+
+  message.reply(`✅ Cleared all warnings for **${tag}**.\n📝 Reason: ${reason}`);
+  logChannel?.send(`✅ **${message.author.tag}** cleared all warnings for **${tag}**\n📝 Reason: ${reason}`);
+}
+
 // === BANLIST ===
   if (cmd === '!banlist' || cmd === '!bannedlist') {
     if (!message.member.permissions.has(PermissionsBitField.Flags.Administrator)) {
@@ -187,20 +206,21 @@ client.on('messageCreate', async (message) => {
     message.reply(`📋 **Banned Members:**\n${lines.join('\n')}`);
   }
 
-// === HELP / GK BOT ===
-  if (cmd === '!gkbot') {
-    message.reply(
-      "📖 **Gatekeeper Bot Commands**\n" +
-      "```\n" +
-      "!warn @user [reason]        → Warn a user (3 warnings = ban, Admin only)\n" +
-      "!warnings [@user]           → Check warnings (anyone)\n" +
-      "!ban @user [reason]         → Manual ban (Admin only)\n" +
-      "!pardon @user [reason]      → Unban + reset warnings (Admin only)\n" +
-      "!banlist / !bannedlist      → Show all banned members (Admin only)\n" +
-      "!gkbot                      → Show this help\n" +
-      "```"
-    );
-  }
+// --- HELP / GK BOT ---
+if (cmd === '!gkbot') {
+  message.reply(
+    "📖 **Gatekeeper Bot Commands**\n" +
+    "```\n" +
+    "!warn @user [reason]        → Warn a user (3 warnings = ban, Admin only)\n" +
+    "!warnings [@user]           → Check warnings (anyone)\n" +
+    "!clearwarns @user [reason]  → Reset a user’s warnings (Admin only)\n" +
+    "!ban @user [reason]         → Manual ban (Admin only)\n" +
+    "!pardon @user [reason]      → Unban + reset warnings (Admin only)\n" +
+    "!banlist / !bannedlist      → Show all banned members (Admin only)\n" +
+    "!gkbot                      → Show this help\n" +
+    "```"
+  );
+}
 });
 
 client.login(TOKEN);
