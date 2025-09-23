@@ -1,15 +1,27 @@
 # 📜 Gatekeeper Bot — Changelog
 
+## v1.4.2 (2025-09-23)
+**Clear Warnings Command**
+
+### ✅ What’s new
+- Added `!clearwarns` command:
+  - Admin-only.
+  - Resets a member’s warnings back to 0/3.
+  - Accepts optional reason (default: `Warnings cleared by <admin>`).
+  - Logs the action in the log channel.
+- Updated `!gkbot` help to include the new command.
+
+---
+
 ## v1.4.1 (2025-09-23)
 **Admin Role Enforcement + Better Errors**
 
-### ✅ What’s new
-- All moderation commands (`!warn`, `!ban`, `!pardon`, `!banlist`) are now **restricted to Admins only** (must have Administrator permission).
+- Restricted moderation commands (`!warn`, `!ban`, `!pardon`, `!banlist`) to **Admins only** (Administrator permission required).
 - Regular members can still use:
-  - `!warnings` (to check their own or others’ warnings).
+  - `!warnings` (to check warnings).
   - `!gkbot` (help command).
 - Improved error handling:
-  - Clearer message when the bot cannot ban a user due to Discord role hierarchy:
+  - Clearer message when the bot cannot ban due to Discord role hierarchy:
     > ⚠️ Could not ban this user — check the bot’s role is above theirs.
 
 ---
