@@ -1,5 +1,5 @@
-// index.js — Gatekeeper v1.3.0 (Slash Commands)
-// Requires: discord.js ^14, express
+// index.js — Gatekeeper v1.5.1 (Slash Commands + Ban Sync)
+// Env vars (Railway): DISCORD_TOKEN, LOG_CHANNEL, GUILD_ID
 
 const {
   Client,
@@ -10,16 +10,17 @@ const {
 } = require('discord.js');
 const express = require('express');
 
-// ====== ENV (Railway Variables) ======
+// ====== ENV ======
 const TOKEN = process.env.DISCORD_TOKEN;
 const LOG_CHANNEL_ID = process.env.LOG_CHANNEL;
+const GUILD_ID = process.env.GUILD_ID;
 
-// ====== Keepalive (optional pinger) ======
+// ====== Keepalive ======
 const app = express();
 app.get('/', (_req, res) => res.send('Gatekeeper is running.'));
 app.listen(3000, () => console.log('✅ Web server running on port 3000'));
 
-// ====== Discord Client ======
+// ====== Client ======
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -30,133 +31,140 @@ const client = new Client({
 });
 
 // ====== State ======
-let bannedUsers = new Set();      // lifetime ban list (synced at startup)
-let warnings = new Map();         // userId -> count (in-memory)
+let bannedUsers = new Set(); // lifetime ban cache
+let warnings = new Map();    // userId -> count (in-memory)
 
-// ====== Helper ======
-const isAdmin = (member) =>
-  member.permissions.has(PermissionsBitField.Flags.Administrator);
-
+// ====== Helpers ======
+const isAdmin = (m) => m.permissions.has(PermissionsBitField.Flags.Administrator);
 const warnCountString = (n) => `${n}/3`;
+const log = (guild, msg) => guild?.channels.cache.get(LOG_CHANNEL_ID)?.send(msg);
 
-// ====== Register Slash Commands on Ready ======
-client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
+// Fetch & cache bans for a guild
+async function syncBansForGuild(guild) {
+  try {
+    const bans = await guild.bans.fetch();
+    // Replace entries for this guild
+    // (we keep a single set; since IDs are global in your server, just refresh all)
+    bannedUsers.clear();
+    for (const [id] of bans) bannedUsers.add(id);
+    console.log(`🔄 Synced ${bans.size} banned IDs for guild: ${guild.name}`);
+  } catch (e) {
+    console.error(`Failed to fetch bans for ${guild?.name || guild?.id}:`, e?.message || e);
+  }
+}
 
+// Register slash commands (guild-fast if GUILD_ID set; else global-slow)
+async function registerSlashCommands() {
   const commands = [
-    new SlashCommandBuilder()
-      .setName('warn')
+    new SlashCommandBuilder().setName('warn')
       .setDescription('Warn a member (Admins only; 3 warnings = auto-ban)')
-      .addUserOption(o =>
-        o.setName('member')
-         .setDescription('Member to warn')
-         .setRequired(true))
-      .addStringOption(o =>
-        o.setName('reason')
-         .setDescription('Reason for the warning')
-         .setRequired(false)),
+      .addUserOption(o => o.setName('member').setDescription('Member to warn').setRequired(true))
+      .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
 
-    new SlashCommandBuilder()
-      .setName('warnings')
+    new SlashCommandBuilder().setName('warnings')
       .setDescription('Check your warnings or another member’s warnings')
-      .addUserOption(o =>
-        o.setName('member')
-         .setDescription('Member to check (optional)')
-         .setRequired(false)),
+      .addUserOption(o => o.setName('member').setDescription('Member to check').setRequired(false)),
 
-    new SlashCommandBuilder()
-      .setName('clearwarns')
+    new SlashCommandBuilder().setName('clearwarns')
       .setDescription('Reset a member’s warnings to 0 (Admins only)')
-      .addUserOption(o =>
-        o.setName('member')
-         .setDescription('Member to clear warnings for')
-         .setRequired(true))
-      .addStringOption(o =>
-        o.setName('reason')
-         .setDescription('Reason')
-         .setRequired(false)),
+      .addUserOption(o => o.setName('member').setDescription('Member to clear').setRequired(true))
+      .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
 
-    new SlashCommandBuilder()
-      .setName('ban')
-      .setDescription('Ban a member by mention/ID (Admins only)')
-      .addUserOption(o =>
-        o.setName('member')
-         .setDescription('Member to ban')
-         .setRequired(true))
-      .addStringOption(o =>
-        o.setName('reason')
-         .setDescription('Reason')
-         .setRequired(false)),
+    new SlashCommandBuilder().setName('ban')
+      .setDescription('Ban a member (Admins only)')
+      .addUserOption(o => o.setName('member').setDescription('Member to ban').setRequired(true))
+      .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
 
-    new SlashCommandBuilder()
-      .setName('pardon')
-      .setDescription('Unban a user by mention/ID (Admins only)')
-      .addUserOption(o =>
-        o.setName('member')
-         .setDescription('User to unban')
-         .setRequired(true))
-      .addStringOption(o =>
-        o.setName('reason')
-         .setDescription('Reason')
-         .setRequired(false)),
+    new SlashCommandBuilder().setName('pardon')
+      .setDescription('Unban a user and reset warnings (Admins only)')
+      .addUserOption(o => o.setName('member').setDescription('User to unban').setRequired(true))
+      .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false)),
 
-    new SlashCommandBuilder()
-      .setName('banlist')
+    new SlashCommandBuilder().setName('banlist')
       .setDescription('Show all permanently banned users (Admins only)'),
 
-    new SlashCommandBuilder()
-      .setName('gkbot')
+    new SlashCommandBuilder().setName('gkbot')
       .setDescription('Show Gatekeeper help & commands'),
   ].map(c => c.toJSON());
 
-  await client.application.commands.set(commands);
-  console.log('📝 Slash commands registered.');
-
-  const guild = client.guilds.cache.first();
-  if (!guild) return console.log('❗ Bot is not in any guild.');
   try {
-    const bans = await guild.bans.fetch();
-    bannedUsers.clear();
-    for (const [id] of bans) bannedUsers.add(id);
-    console.log(`🔄 Synced ${bans.size} banned IDs into lifetime list.`);
+    if (GUILD_ID) {
+      const guild = client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID);
+      await guild.commands.set(commands);
+      console.log(`📝 Registered guild slash commands for ${guild.name} (${guild.id})`);
+    } else {
+      await client.application.commands.set(commands);
+      console.log('📝 Registered GLOBAL slash commands (Discord may take up to ~1 hour).');
+    }
   } catch (e) {
-    console.error('Failed to fetch bans:', e);
+    console.error('Slash command registration failed:', e?.message || e);
   }
+}
+
+// ====== Ready ======
+client.once('ready', async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+  await registerSlashCommands();
+
+  // Sync bans for target guild (or first available)
+  const guild =
+    (GUILD_ID && (client.guilds.cache.get(GUILD_ID) || await client.guilds.fetch(GUILD_ID).catch(() => null))) ||
+    client.guilds.cache.first();
+
+  if (guild) await syncBansForGuild(guild);
+  else console.log('❗ Bot is not in any guild yet.');
+});
+
+// ====== Keep cache accurate when bans change ======
+client.on('guildBanAdd', (ban) => {
+  bannedUsers.add(ban.user.id);
+});
+client.on('guildBanRemove', (ban) => {
+  bannedUsers.delete(ban.user.id);
 });
 
 // ====== Auto actions: join/leave ======
 client.on('guildMemberAdd', async (member) => {
-  const logCh = member.guild.channels.cache.get(LOG_CHANNEL_ID);
   if (bannedUsers.has(member.id)) {
     try {
       await member.guild.members.ban(member.id, { reason: 'Rejoined after leaving (lifetime ban)' });
-      logCh?.send(`🚫 **${member.user.tag}** tried to rejoin and was banned.\n📝 Reason: Rejoined after leaving`);
+      log(member.guild, `🚫 **${member.user.tag}** tried to rejoin and was banned.\n📝 Reason: Rejoined after leaving`);
     } catch {
-      logCh?.send(`⚠️ Could not ban **${member.user.tag}** — missing permissions or bot role too low.`);
+      log(member.guild, `⚠️ Could not ban **${member.user.tag}** — missing permissions or bot role too low.`);
     }
   } else {
-    logCh?.send(`✅ **${member.user.tag}** joined the server.`);
+    log(member.guild, `✅ **${member.user.tag}** joined the server.`);
   }
 });
 
 client.on('guildMemberRemove', async (member) => {
-  const logCh = member.guild.channels.cache.get(LOG_CHANNEL_ID);
   bannedUsers.add(member.id);
-  logCh?.send(`❌ **${member.user.tag}** left.\n🚫 Now banned for life.`);
+  log(member.guild, `❌ **${member.user.tag}** left.\n🚫 Now banned for life.`);
   try {
     await member.guild.members.ban(member.id, { reason: 'Left the server (lifetime ban)' });
   } catch {
-    logCh?.send(`⚠️ Could not ban **${member.user.tag}** — missing permissions or bot role too low.`);
+    log(member.guild, `⚠️ Could not ban **${member.user.tag}** — missing permissions or bot role too low.`);
+  }
+});
+
+// If the bot is invited to a new guild, register commands there & sync bans
+client.on('guildCreate', async (guild) => {
+  console.log(`➕ Joined guild: ${guild.name} (${guild.id})`);
+  if (GUILD_ID && guild.id !== GUILD_ID) return; // single-guild mode
+  try {
+    await guild.commands.set([]); // clear any old (rarely needed)
+    await registerSlashCommands(); // will handle guild/global
+    await syncBansForGuild(guild);
+  } catch (e) {
+    console.error('guildCreate setup failed:', e?.message || e);
   }
 });
 
 // ====== Slash Command Handling ======
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isCommand()) return;
-
   const { commandName } = interaction;
   const guild = interaction.guild;
-  const logCh = guild?.channels.cache.get(LOG_CHANNEL_ID);
 
   const fail = (msg) => interaction.reply({ content: msg, ephemeral: true });
 
@@ -175,15 +183,15 @@ client.on('interactionCreate', async (interaction) => {
       try {
         await guild.members.ban(user.id, { reason: `Reached 3 warnings: ${reason}` });
         await interaction.reply(`🚫 **${user.tag}** has been banned after 3 warnings.\n📝 Reason: ${reason}`);
-        logCh?.send(`🚫 **${interaction.user.tag}** banned **${user.tag}** after 3 warnings.\n📝 Reason: ${reason}`);
+        log(guild, `🚫 **${interaction.user.tag}** banned **${user.tag}** after 3 warnings.\n📝 Reason: ${reason}`);
       } catch {
-        await fail("⚠️ Could not ban this user — check bot's role is above theirs.");
+        await fail("⚠️ Could not ban this user — check the bot's role is above theirs.");
       }
       return;
     }
 
     await interaction.reply(`⚠️ **${user.tag}** has been warned. (${warnCountString(count)})\n📝 Reason: ${reason}`);
-    logCh?.send(`⚠️ **${interaction.user.tag}** warned **${user.tag}** (${warnCountString(count)})\n📝 Reason: ${reason}`);
+    log(guild, `⚠️ **${interaction.user.tag}** warned **${user.tag}** (${warnCountString(count)})\n📝 Reason: ${reason}`);
     return;
   }
 
@@ -203,7 +211,7 @@ client.on('interactionCreate', async (interaction) => {
 
     warnings.delete(user.id);
     await interaction.reply(`✅ Cleared all warnings for **${user.tag}**.\n📝 Reason: ${reason}`);
-    logCh?.send(`✅ **${interaction.user.tag}** cleared warnings for **${user.tag}**\n📝 Reason: ${reason}`);
+    log(guild, `✅ **${interaction.user.tag}** cleared warnings for **${user.tag}**\n📝 Reason: ${reason}`);
     return;
   }
 
@@ -217,9 +225,9 @@ client.on('interactionCreate', async (interaction) => {
     try {
       await guild.members.ban(user.id, { reason });
       await interaction.reply(`🚫 Banned **${user.tag}**.\n📝 Reason: ${reason}`);
-      logCh?.send(`🚫 **${interaction.user.tag}** banned **${user.tag}**\n📝 Reason: ${reason}`);
+      log(guild, `🚫 **${interaction.user.tag}** banned **${user.tag}**\n📝 Reason: ${reason}`);
     } catch {
-      await fail("⚠️ Could not ban this user — check bot's role is above theirs.");
+      await fail("⚠️ Could not ban this user — check the bot's role is above theirs.");
     }
     return;
   }
@@ -236,7 +244,7 @@ client.on('interactionCreate', async (interaction) => {
     try {
       await guild.bans.remove(user.id, reason);
       await interaction.reply(`✅ Pardoned **${user.tag}**.\n📝 Reason: ${reason}`);
-      logCh?.send(`✅ **${interaction.user.tag}** pardoned **${user.tag}**\n📝 Reason: ${reason}`);
+      log(guild, `✅ **${interaction.user.tag}** pardoned **${user.tag}**\n📝 Reason: ${reason}`);
     } catch {
       await fail("⚠️ Could not unban this user — maybe they're not banned?");
     }
