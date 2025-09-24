@@ -1,8 +1,9 @@
-// CommonJS deployer – clears guild commands then deploys new ones (guild-only)
+// CommonJS: deploy guild slash commands so EVERYONE can see them.
+// Admin gating is enforced at runtime in index.js (not here).
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const TOKEN     = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;   // Application (bot) ID
+const CLIENT_ID = process.env.CLIENT_ID;   // Bot/Application ID
 const GUILD_ID  = process.env.GUILD_ID;    // Your server ID
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
@@ -10,8 +11,8 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
   process.exit(1);
 }
 
-const commands = [
-  // Moderation (visible to all; restricted at runtime)
+const cmds = [
+  // ==== Admin-only to USE (but visible to all) ====
   new SlashCommandBuilder()
     .setName('warn')
     .setDescription('Warn a member (Admins only; 3 warnings = auto-ban)')
@@ -45,7 +46,7 @@ const commands = [
     .setDescription('Show all permanently banned users (Admins only)')
     .setDMPermission(false),
 
-  // Everyone can use
+  // ==== Everyone can use ====
   new SlashCommandBuilder()
     .setName('warnings')
     .setDescription('Check your warnings or another member’s warnings')
@@ -61,20 +62,20 @@ const commands = [
 async function run() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-  // Optional: best-effort global clear (skip errors)
+  // Optional: best-effort clear GLOBAL (prevents duplicates if you ever registered globally)
   try {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
-    console.log('✅ GLOBAL commands cleared.');
+    console.log('✅ Cleared GLOBAL commands.');
   } catch (e) {
-    console.log('ℹ️ Skipping GLOBAL clear:', e?.status || '', e?.message || '');
+    console.log('ℹ️ Skip GLOBAL clear:', e?.status || '', e?.message || '');
   }
 
-  console.log(`🗺️ Clearing GUILD commands for ${GUILD_ID} ...`);
+  console.log(`🗺️ Clearing GUILD commands for ${GUILD_ID}...`);
   await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
-  console.log('✅ GUILD commands cleared.');
+  console.log('✅ Guild commands cleared.');
 
-  console.log(`🚀 Deploying ${commands.length} commands to guild ${GUILD_ID} ...`);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
+  console.log(`🚀 Deploying ${cmds.length} commands to guild ${GUILD_ID}...`);
+  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: cmds });
   console.log('✅ Guild commands deployed (instant).');
 }
 
