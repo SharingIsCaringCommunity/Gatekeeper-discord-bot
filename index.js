@@ -33,6 +33,9 @@ const warnings    = new Map();   // userId -> count
 const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'clearwarns']);
 const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 
+// mention without ping (clickable @, quiet)
+const NO_PING = { allowedMentions: { parse: [], users: [] } };
+
 const log = (guild, content) => {
   const ch = guild.channels.cache.get(LOG_CHANNEL);
   if (ch) ch.send({ content }).catch(() => {});
@@ -91,6 +94,7 @@ client.on('interactionCreate', async (interaction) => {
 
   const { guild, commandName: cmd } = interaction;
 
+  // Visible to all; restrict execution here
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
     return interaction.reply({
       content: '⚠️ You must be an **Admin** to use this command.'
@@ -164,6 +168,7 @@ client.on('interactionCreate', async (interaction) => {
       bannedUsers.add(user.id);
       try {
         await guild.members.ban(user.id, { reason });
+        // No ping here — tag + ID only
         await interaction.reply(`🚫 Banned **${user.tag}** (${user.id}). 📝 ${reason}`);
         log(guild, `🚫 **${interaction.user.tag}** banned **${user.tag}** (${user.id}). 📝 ${reason}`);
       } catch {
@@ -188,21 +193,43 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'banlist') {
-      if (bannedUsers.size === 0) {
+      // 🔥 LIVE fetch every time so it never goes stale
+      const bans = await guild.bans.fetch().catch(() => null);
+      if (!bans) return interaction.reply('⚠️ Could not fetch ban list (permissions/API).');
+
+      // refresh cache from live data
+      bannedUsers.clear();
+      for (const [id] of bans) bannedUsers.add(id);
+
+      if (bans.size === 0) {
         return interaction.reply({ content: '📋 No users in the lifetime ban list.' });
       }
-      const ids = [...bannedUsers];
+
+      // Build lines with @mention (clickable) + tag + ID, but DO NOT ping
       const lines = [];
-      for (const id of ids) {
-        try {
-          const u = await client.users.fetch(id);
-          lines.push(`• **${u.tag}** (${id})`);
-        } catch {
-          lines.push(`• (unknown) (${id})`);
-        }
+      for (const [, entry] of bans) {
+        const u = entry.user;
+        lines.push(`• <@${u.id}> — **${u.tag}** (${u.id})`);
       }
-      const text = '📋 **Lifetime Ban List**\n' + lines.join('\n');
-      return interaction.reply({ content: text.slice(0, 1990) });
+
+      // Split if too long
+      const header = '📋 **Lifetime Ban List**\n';
+      let buf = header;
+      const chunks = [];
+      for (const line of lines) {
+        if ((buf + line + '\n').length > 1900) {
+          chunks.push(buf);
+          buf = '';
+        }
+        buf += line + '\n';
+      }
+      if (buf.length) chunks.push(buf);
+
+      for (const chunk of chunks) {
+        // allowedMentions prevents pings but keeps the mention formatting
+        await interaction.reply({ content: chunk, ...NO_PING });
+      }
+      return;
     }
   } catch (err) {
     console.error(err);
