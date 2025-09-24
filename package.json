@@ -1,13 +1,16 @@
 {
   "name": "busypang-bot",
-  "version": "1.5.3",
+  "version": "1.5.4",
+  "description": "Gatekeeper / BusyPang Discord bot",
   "main": "index.js",
+  "type": "commonjs",
+  "engines": { "node": ">=18.0.0" },
   "scripts": {
-    "start": "node deploy-commands.js && node index.js",
+    "start": "node index.js",
     "deploy": "node deploy-commands.js"
   },
   "dependencies": {
-    "discord.js": "^14.14.1",
-    "express": "^4.18.2"
+    "discord.js": "^14.15.3",
+    "express": "^4.19.2"
   }
 }

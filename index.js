@@ -1,4 +1,4 @@
-// CommonJS runtime — everyone can SEE commands, admin-only can USE mod ones.
+// Runtime — everyone can SEE commands; only admins can USE mod ones.
 const {
   Client,
   GatewayIntentBits,

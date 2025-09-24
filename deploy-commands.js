@@ -1,5 +1,5 @@
-// CommonJS: deploy guild slash commands so EVERYONE can see them.
-// Admin gating is enforced at runtime in index.js (not here).
+// Deploy guild slash commands so EVERYONE can see them.
+// Admin gating is enforced at runtime in index.js.
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
 const TOKEN     = process.env.DISCORD_TOKEN;
@@ -12,7 +12,7 @@ if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
 }
 
 const cmds = [
-  // ==== Admin-only to USE (but visible to all) ====
+  // Admin-only to USE (visible to all)
   new SlashCommandBuilder()
     .setName('warn')
     .setDescription('Warn a member (Admins only; 3 warnings = auto-ban)')
@@ -46,7 +46,7 @@ const cmds = [
     .setDescription('Show all permanently banned users (Admins only)')
     .setDMPermission(false),
 
-  // ==== Everyone can use ====
+  // Everyone can use
   new SlashCommandBuilder()
     .setName('warnings')
     .setDescription('Check your warnings or another member’s warnings')
@@ -62,7 +62,7 @@ const cmds = [
 async function run() {
   const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-  // Optional: best-effort clear GLOBAL (prevents duplicates if you ever registered globally)
+  // Optional: clear GLOBAL to avoid duplicates if you ever had them
   try {
     await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
     console.log('✅ Cleared GLOBAL commands.');
