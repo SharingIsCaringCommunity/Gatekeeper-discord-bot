@@ -1,4 +1,4 @@
-// CommonJS runtime
+// CommonJS runtime — everyone can SEE commands, admin-only can USE mod ones.
 const {
   Client,
   GatewayIntentBits,
@@ -7,10 +7,10 @@ const {
 } = require('discord.js');
 const express = require('express');
 
-const TOKEN        = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL  = process.env.LOG_CHANNEL;
+const TOKEN       = process.env.DISCORD_TOKEN;
+const LOG_CHANNEL = process.env.LOG_CHANNEL; // channel ID for logs
 
-// --- Keepalive (Railway-friendly) ---
+// --- Keepalive (Railway) ---
 const app = express();
 app.get('/', (_req, res) => res.send('BusyPang is running.'));
 app.listen(3000, () => console.log('✅ Web server running on port 3000'));
@@ -26,25 +26,22 @@ const client = new Client({
   ],
 });
 
-// In-memory stores (simple)
-const bannedUsers  = new Set();             // lifetime ban IDs
-const warnings     = new Map();             // userId -> count (0..3)
+// Simple in-memory stores
+const bannedUsers = new Set();   // lifetime ban IDs
+const warnings    = new Map();   // userId -> count
 
 const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'clearwarns']);
+const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 
-function isAdmin(interaction) {
-  return interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-}
-
-function log(guild, content) {
+const log = (guild, content) => {
   const ch = guild.channels.cache.get(LOG_CHANNEL);
   if (ch) ch.send({ content }).catch(() => {});
-}
+};
 
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Sync bans from the first guild (or all guilds if you run multi-guild)
+  // Sync bans for each guild the bot is in
   for (const [, guild] of client.guilds.cache) {
     try {
       const bans = await guild.bans.fetch();
@@ -57,7 +54,7 @@ client.once('ready', async () => {
   }
 });
 
-// Keep lifetime list updated in real time
+// Keep lifetime list updated
 client.on('guildBanAdd', (ban) => bannedUsers.add(ban.user.id));
 client.on('guildBanRemove', (ban) => bannedUsers.delete(ban.user.id));
 
@@ -88,13 +85,13 @@ client.on('guildMemberRemove', async (member) => {
   }
 });
 
-// --- Slash Commands ---
+// --- Slash Command Handler ---
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
-  const { commandName: cmd, guild } = interaction;
+  const { guild, commandName: cmd } = interaction;
 
-  // Everyone can see commands; restrict execution for admin-only set
+  // Visible to all; restrict execution here
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
     return interaction.reply({
       content: '⚠️ You must be an **Admin** to use this command.',
@@ -125,7 +122,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'warnings') {
-      const user = interaction.options.getUser('member') || interaction.user;
+      const user  = interaction.options.getUser('member') || interaction.user;
       const count = warnings.get(user.id) || 0;
       return interaction.reply({
         content: `🧾 **${user.tag}** has **${count}/3** warning(s).`,
@@ -134,21 +131,21 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'warn') {
-      const user = interaction.options.getUser('member');
+      const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
       const current = warnings.get(user.id) || 0;
       const next = Math.min(3, current + 1);
       warnings.set(user.id, next);
 
       await interaction.reply(`⚠️ Warned **${user.tag}** — now at **${next}/3**. Reason: ${reason}`);
-      log(guild, `⚠️ **${interaction.user.tag}** warned **<@${user.id}>** (${user.id}) — ${next}/3. 📝 ${reason}`);
+      log(guild, `⚠️ **${interaction.user.tag}** warned **<@${user.id}>** — ${next}/3. 📝 ${reason}`);
 
       if (next >= 3) {
         bannedUsers.add(user.id);
         try {
           await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (${reason})` });
           log(guild, `🚫 Auto-banned **<@${user.id}>** at 3 warnings.`);
-        } catch (e) {
+        } catch {
           log(guild, `⚠️ Could not auto-ban **<@${user.id}>** — check role/permissions.`);
         }
       }
@@ -156,7 +153,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'clearwarns') {
-      const user = interaction.options.getUser('member');
+      const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warnings cleared by ${interaction.user.tag}`;
       warnings.set(user.id, 0);
       await interaction.reply(`🧹 Cleared warnings for **${user.tag}**. 📝 ${reason}`);
@@ -165,7 +162,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'ban') {
-      const user = interaction.options.getUser('member');
+      const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
       bannedUsers.add(user.id);
       try {
@@ -179,7 +176,7 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'pardon') {
-      const user = interaction.options.getUser('member');
+      const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Pardon issued by ${interaction.user.tag}`;
       bannedUsers.delete(user.id);
       warnings.set(user.id, 0);
@@ -197,7 +194,6 @@ client.on('interactionCreate', async (interaction) => {
       if (bannedUsers.size === 0) {
         return interaction.reply({ content: '📋 No users in the lifetime ban list.', ephemeral: true });
       }
-      // Resolve tags for nicer output
       const ids = [...bannedUsers];
       const lines = [];
       for (const id of ids) {
@@ -208,20 +204,8 @@ client.on('interactionCreate', async (interaction) => {
           lines.push(`• (unknown) (<@${id}>)`);
         }
       }
-      const chunks = [];
-      let buf = '📋 **Lifetime Ban List**\n' + lines.join('\n');
-      // Discord 2000 char cap safety
-      while (buf.length > 1900) {
-        const cut = buf.lastIndexOf('\n', 1800);
-        chunks.push(buf.slice(0, cut));
-        buf = buf.slice(cut + 1);
-      }
-      chunks.push(buf);
-
-      for (const c of chunks) {
-        await interaction.reply({ content: c, ephemeral: true });
-      }
-      return;
+      const text = '📋 **Lifetime Ban List**\n' + lines.join('\n');
+      return interaction.reply({ content: text.slice(0, 1990), ephemeral: true });
     }
   } catch (err) {
     console.error(err);
