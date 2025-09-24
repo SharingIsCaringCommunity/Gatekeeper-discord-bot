@@ -4,9 +4,9 @@
 
 const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 
-const TOKEN   = process.env.DISCORD_TOKEN;
-const APP_ID  = process.env.APP_ID;   // Application (bot) ID
-const GUILD_ID= process.env.GUILD_ID; // Target guild
+const TOKEN    = process.env.DISCORD_TOKEN;
+const APP_ID   = process.env.APP_ID;    // Application (bot) ID
+const GUILD_ID = process.env.GUILD_ID;  // Target guild
 
 if (!TOKEN || !APP_ID || !GUILD_ID) {
   console.error('❌ Set DISCORD_TOKEN, APP_ID, and GUILD_ID env vars.');
@@ -49,12 +49,22 @@ const commands = [
     .addStringOption(o => o.setName('reason').setDescription('Reason'))
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
-  // /pardon @member [reason]  (Admin)
+  // /pardon user_id [reason]  (Admin) — user_id ONLY
   new SlashCommandBuilder()
     .setName('pardon')
-    .setDescription('Unban a user and reset warnings to 0')
-    .addUserOption(o => o.setName('member').setDescription('User to unban').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .setDescription('Unban by user ID, reset warnings to 0 , and allow rejoining (Admins only)')
+    .addStringOption(o =>
+      o.setName('user_id')
+       .setDescription('Discord user ID to unban (copy ID in Developer Mode)')
+       .setMinLength(16)
+       .setMaxLength(32)
+       .setRequired(true)
+    )
+    .addStringOption(o =>
+      o.setName('reason')
+       .setDescription('Reason for the pardon')
+       .setRequired(false)
+    )
     .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
   // /banlist  (Admin)
