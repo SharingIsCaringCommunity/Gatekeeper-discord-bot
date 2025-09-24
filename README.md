@@ -1,101 +1,66 @@
 # 📜 Gatekeeper Bot — Changelog
 
 <p align="left">
-  <img src="https://img.shields.io/badge/version-v1.5.8-blue?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/version-v1.6.1-blue?style=for-the-badge" />
   <img src="https://img.shields.io/badge/status-stable-brightgreen?style=for-the-badge" />
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=for-the-badge" />
 </p>
 
 ---
 
-## v1.5.8 (2025-09-24)  
-**Permissions Refinement**
+## v1.6.1 (2025-09-24)  
+**Warnings → Lifetime Ban (3 strikes system)**  
 
 ### ✅ What’s new
-- `/warnings` is now **split by role**:
-  - Normal members → can only check **their own warnings**.  
-  - Admins → can check warnings for **any member**.  
-- `/banlist` and `/warnlist` remain **Admin-only**.  
-- Public replies for all errors (no more hidden “Only you can see this”).  
+- **Auto-ban improvements:**  
+  - On reaching **3 warnings**, users are now **lifetime banned automatically**.  
+  - The bot replies publicly: `⚠️ User reached 3 warnings and was banned 🚫`.  
+  - Lifetime ban list is updated instantly.  
+- **DM enhancements:**  
+  - When a user is warned, they receive a **DM embed** with:  
+    - Reason for the warning.  
+    - Current warning count.  
+    - Who warned them.  
+    - Optional link to server rules (`RULES_LINK`).  
+  - If banned at 3 warnings, the DM clearly shows **who banned them** and why.  
+- **Logging:**  
+  - Logs now record:  
+    - Who warned/banned the user.  
+    - If the ban was triggered by reaching 3 warnings.  
+    - Mentions (`<@user>`) instead of plain tags for easier navigation.  
+
+### 🔄 Improvements
+- Cleaner warning/banning flow with emojis for readability.  
+- More user-friendly DM layout with embeds instead of plain text.  
 
 ---
 
-## v1.5.7 (2025-09-24)  
-**Warnings List (Paginated Embeds)**  
+## v1.6.0 (2025-09-24)  
+**Pagination & UX Upgrade**  
 
-- Added `/warnlist` (Admin-only).  
-- Paginated embeds with Prev / Next / Refresh / Close buttons.  
-- Sorted by highest warnings first.  
-- Mentions clickable (`<@id>`) but don’t ping.  
-
----
-
-## v1.5.6 (2025-09-23)  
-**Banlist Pagination & Buttons**  
-
-- Upgraded `/banlist` into paginated embeds.  
-- Added Prev / Next / Refresh / Close controls.  
-- Mentions clickable without ping.  
-- Auto-timeout after 2 minutes.  
+- Added **paginated banlist** (`/banlist`) with **Prev / Next / Refresh / Close** buttons.  
+- Added **paginated warnlist** (`/warnlist`) for admins to review members with warnings.  
+- Only command invoker can use pagination controls.  
+- Everyone can use `/warnings` to check their own (or others’) warnings.  
+- Emojis added across commands for clearer context.  
 
 ---
 
-## v1.5.5 (2025-09-23)  
-**Better Mentions & Sync**  
+## v1.5.9 (2025-09-24)  
+**Mentions + Logs Update**  
 
-- `/banlist` now uses `<@id>` for clickable profiles.  
-- Fallback `(unknown)` if user cache missing.  
-- No more `@unknown-user` spam.  
-
----
-
-## v1.5.4 (2025-09-23)  
-**Permissions & Replies**  
-
-- Everyone can see commands, but only Admins can run moderation ones.  
-- Error messages are now public replies.  
+- `/warn`, `/pardon`, `/clearwarns` now show **user mentions** (`<@id>`) instead of plain tags.  
+- Logs also updated to include mentions for quick profile access.  
 
 ---
 
-## v1.5.3 (2025-09-23)  
-**Slash Command Fixes**  
+## v1.5.8 (2025-09-24)  
+**Banlist + Warnlist Fixes**  
 
-- Fixed duplicate slash command registration.  
-- Enforced per-guild registration for instant visibility.  
-
----
-
-## v1.5.2 (2025-09-23)  
-**Stability & Quality Polishing**  
-
-- Improved ban sync reliability.  
-- Clearer feedback in `/banlist`, `/warnings`, `/pardon`.  
-- Logs now use `<@user>` mentions.  
+- `/banlist` and `/warnlist` show properly sorted lists.  
+- Fixed crash when lists exceeded length limits by adding pagination prep.  
+- Clearer error handling when fetching users fails.  
 
 ---
 
-## v1.5.1 (2025-09-23)  
-**Ban Sync & Guild Support**  
-
-- Synced ban list with server on startup.  
-- Live updates with `guildBanAdd` / `guildBanRemove`.  
-- Slash commands auto-registered on new servers.  
-
----
-
-## v1.5.0 (2025-09-23)  
-**Slash Command Migration + Ban Sync**  
-
-- Migrated all `!prefix` commands to slash commands.  
-- Added: `/bb`, `/warn`, `/warnings`, `/clearwarns`, `/ban`, `/pardon`, `/banlist`.  
-- Per-guild registration with `GUILD_ID`.  
-- Better error messages for role hierarchy.  
-
----
-
-## Older Versions
-- **v1.4.0–1.4.3** → Warning system, clearwarns, admin checks.  
-- **v1.3.x** → ENV vars, help → bb, startup sync.  
-- **v1.2** → Manual commands (`!ban`, `!pardon`, etc).  
-- **v1.1** → Improved auto-ban, join/leave logs.  
-- **v1.0** → Initial release (auto-ban leavers, rejoiners).  
+_(Earlier versions v1.5.7 → v1.0 omitted for brevity but remain in repo history.)_
