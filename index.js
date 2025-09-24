@@ -138,53 +138,40 @@ async function sendPaginator(interaction, { title, perPage = 15, color, supplier
   });
 }
 
-// ===== Boot / Sync live bans into cache =====
+// Helpful error guards so the bot doesn't crash on transient issues
+client.on('error', (err) => console.error('Client error:', err));
+client.on('shardError', (err) => console.error('Shard error:', err));
+process.on('unhandledRejection', (reason) => console.error('Unhandled rejection:', reason));
+process.on('uncaughtException', (err) => console.error('Uncaught exception:', err));
+
+
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  
-  for (const [, guild] of client.guilds.cache) {
+
+  // — Sync bans at boot (keep your existing code here) —
+
+  // --- Activity randomizer (3 rotating activities) ---
+  const activities = [
+    { type: 0, name: 'I am BusyBot | /bb' },           // Playing
+    { type: 3, name: "you'all 👀" },                   // Watching
+    { type: 2, name: ' /commands 🎶' },                // Listening
+  ];
+
+  function setRandomPresence() {
     try {
-      const bans = await guild.bans.fetch();
-      for (const [id] of bans) bannedUsers.add(id);
-      console.log(`🔄 Synced ${bans.size} bans for ${guild.name}`);
+      const a = activities[Math.floor(Math.random() * activities.length)];
+      client.user.setPresence({
+        activities: [{ name: a.name, type: a.type }],
+        status: 'online',
+      });
     } catch (e) {
-      console.log(`⚠️ Failed to fetch bans for ${guild.name}:`, e?.message || e);
+      console.error('Failed to set presence:', e);
     }
   }
 
-  // === Fancy rotating presence (randomized) ===
-  const STATUSES = [
-    { name: "I'm a BusyBot | /bb", type: ActivityType.Playing },
-    { name: "you'all 👀",          type: ActivityType.Watching },
-    { name: "/commands 🎶",        type: ActivityType.Listening },
-  ];
-
-  function pickRandom(arr) {
-    return arr[Math.floor(Math.random() * arr.length)];
-  }
-
-  let presenceTimer;
-
-  function setRandomPresence() {
-    const activity = pickRandom(STATUSES);
-    client.user.setPresence({
-      activities: [activity],
-      status: "online",
-    }).catch(() => {});
-  }
-
-  // set one immediately
+  // Set now, then rotate every 10 minutes
   setRandomPresence();
-
-  // rotate every 25–45s
-  function startPresenceRotator() {
-    if (presenceTimer) clearInterval(presenceTimer);
-    presenceTimer = setInterval(() => {
-      setRandomPresence();
-    }, Math.floor(25000 + Math.random() * 20000));
-  }
-
-  startPresenceRotator();
+  setInterval(setRandomPresence, 10 * 60 * 1000);
 });
 
 // Keep cache in sync with ban/unban
