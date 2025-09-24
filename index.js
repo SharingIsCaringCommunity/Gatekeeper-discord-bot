@@ -12,6 +12,7 @@ const {
   ButtonBuilder,
   ButtonStyle,
   ComponentType,
+  ActivityType,
 } = require('discord.js');
 const express = require('express');
 
@@ -140,6 +141,7 @@ async function sendPaginator(interaction, { title, perPage = 15, color, supplier
 // ===== Boot / Sync live bans into cache =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
+  
   for (const [, guild] of client.guilds.cache) {
     try {
       const bans = await guild.bans.fetch();
@@ -149,6 +151,40 @@ client.once('ready', async () => {
       console.log(`⚠️ Failed to fetch bans for ${guild.name}:`, e?.message || e);
     }
   }
+
+  // === Fancy rotating presence (randomized) ===
+  const STATUSES = [
+    { name: "I'm a BusyBot | /bb", type: ActivityType.Playing },
+    { name: "you'all 👀",          type: ActivityType.Watching },
+    { name: "/commands 🎶",        type: ActivityType.Listening },
+  ];
+
+  function pickRandom(arr) {
+    return arr[Math.floor(Math.random() * arr.length)];
+  }
+
+  let presenceTimer;
+
+  function setRandomPresence() {
+    const activity = pickRandom(STATUSES);
+    client.user.setPresence({
+      activities: [activity],
+      status: "online",
+    }).catch(() => {});
+  }
+
+  // set one immediately
+  setRandomPresence();
+
+  // rotate every 25–45s
+  function startPresenceRotator() {
+    if (presenceTimer) clearInterval(presenceTimer);
+    presenceTimer = setInterval(() => {
+      setRandomPresence();
+    }, Math.floor(25000 + Math.random() * 20000));
+  }
+
+  startPresenceRotator();
 });
 
 // Keep cache in sync with ban/unban
