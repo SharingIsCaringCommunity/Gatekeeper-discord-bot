@@ -341,25 +341,33 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // --- /pardon : admin (by user ID) ---
-    if (cmd === 'pardon') {
-      const userId = interaction.options.getString('user_id'); // string input (ID)
-      const reason = interaction.options.getString('reason') || `Pardon issued by ${interaction.user.tag}`;
+// --- /pardon : admin (by user_id, works even if not in guild) ---
+if (cmd === 'pardon') {
+  const userId = interaction.options.getString('user_id'); // STRING option
+  const reason = interaction.options.getString('reason') || `Pardon issued by ${interaction.user.tag}`;
 
-      bannedUsers.delete(userId);
-      const warnMap = getGuildWarnings(guild.id);
-      warnMap.set(userId, 0);
+  // remove from lifetime cache + reset warnings
+  bannedUsers.delete(userId);
+  getGuildWarnings(guild.id).set(userId, 0);
 
-      try {
-        await guild.bans.remove(userId, reason);
-        await interaction.reply(`✅ Pardoned <@${userId}>. 📝 ${reason}`);
-        log(guild, `✅ **${interaction.user.tag}** pardoned <@${userId}>. 📝 ${reason}`);
-      } catch (err) {
-        console.error(err);
-        await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).' });
-      }
-      return;
-    }
+  try {
+    // unban by ID
+    await guild.bans.remove(userId, reason);
+
+    // best-effort fetch for nicer tag in messages
+    let tag = userId;
+    try {
+      const u = await client.users.fetch(userId);
+      tag = u?.tag ?? userId;
+    } catch {}
+
+    await interaction.reply(`✅ Pardoned **<@${userId}>** (${tag}). 📝 ${reason}`);
+    log(guild, `✅ **${interaction.user.tag}** pardoned **<@${userId}>** (${userId}). 📝 ${reason}`);
+  } catch (e) {
+    await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).' });
+  }
+  return;
+}
 
     // --- /banlist : admin (paged, live fetch) ---
     if (cmd === 'banlist') {
