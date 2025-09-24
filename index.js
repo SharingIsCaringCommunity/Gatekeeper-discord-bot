@@ -1,4 +1,4 @@
-// Runtime — everyone can SEE replies (no ephemeral).
+// BusyPang — Runtime (non-ephemeral replies; everyone can see responses)
 const {
   Client,
   GatewayIntentBits,
@@ -10,8 +10,8 @@ const {
 } = require('discord.js');
 const express = require('express');
 
-const TOKEN       = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL = process.env.LOG_CHANNEL; // channel ID for logs
+const TOKEN       = process.env.DISCORD_TOKEN; // REQUIRED
+const LOG_CHANNEL = process.env.LOG_CHANNEL;   // REQUIRED (channel ID)
 
 // --- Keepalive (Railway) ---
 const app = express();
@@ -29,29 +29,24 @@ const client = new Client({
   ],
 });
 
-// Simple in-memory stores
-const bannedUsers = new Set();   // lifetime ban IDs
-const warnings    = new Map();   // userId -> count
+// In-memory state (reset on restart — use DB if you need persistence)
+const bannedUsers = new Set(); // lifetime ban IDs
+const warnings    = new Map(); // Map<userId, count>
 
-const ADMIN_CMDS = new Set([
-  'warn', 'ban', 'pardon', 'banlist', 'clearwarns', 'warnlist'
-]);
-const isAdmin = (i) =>
-  i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-
-// mention without ping (clickable @, quiet)
+const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'clearwarns', 'warnlist']);
+const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 const NO_PING = { allowedMentions: { parse: [], users: [] } };
 
-// ---------- helpers ----------
-const PAGE_SIZE_BAN  = 15; // ban entries per page
-const PAGE_SIZE_WARN = 10; // warning entries per page
+// --- helpers ---
+const PAGE_SIZE_BAN  = 15;
+const PAGE_SIZE_WARN = 10;
 
 const log = (guild, content) => {
   const ch = guild.channels.cache.get(LOG_CHANNEL);
   if (ch) ch.send({ content, ...NO_PING }).catch(() => {});
 };
 
-function makePages(items, perPage, lineBuilder) {
+const makePages = (items, perPage, lineBuilder) => {
   const pages = [];
   for (let i = 0; i < items.length; i += perPage) {
     const slice = items.slice(i, i + perPage);
@@ -59,24 +54,23 @@ function makePages(items, perPage, lineBuilder) {
     pages.push(lines.join('\n') || '(no entries)');
   }
   return pages.length ? pages : ['(no entries)'];
-}
+};
 
-function makeEmbed({ title, desc, color = 0xffbf00, footer }) {
+const makeEmbed = ({ title, desc, color = 0xffbf00, footer }) => {
   const emb = new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
   if (footer) emb.setFooter(footer);
   return emb;
-}
+};
 
-function makeRow(ids, disabled = {}) {
-  return new ActionRowBuilder().addComponents(
+const makeRow = (ids, disabled = {}) =>
+  new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(ids.prev).setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(!!disabled.prev),
     new ButtonBuilder().setCustomId(ids.next).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(!!disabled.next),
     new ButtonBuilder().setCustomId(ids.refresh).setLabel('🔄 Refresh').setStyle(ButtonStyle.Primary),
     new ButtonBuilder().setCustomId(ids.close).setLabel('✖ Close').setStyle(ButtonStyle.Danger),
   );
-}
 
-// ---------- ready ----------
+// --- ready + initial sync ---
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   for (const [, guild] of client.guilds.cache) {
@@ -91,11 +85,11 @@ client.once('ready', async () => {
   }
 });
 
-// Keep lifetime list updated
+// keep cache in sync
 client.on('guildBanAdd', (ban) => bannedUsers.add(ban.user.id));
 client.on('guildBanRemove', (ban) => bannedUsers.delete(ban.user.id));
 
-// Auto-ban if a banned user rejoins
+// autoban if banned user rejoins
 client.on('guildMemberAdd', async (member) => {
   const g = member.guild;
   if (bannedUsers.has(member.id)) {
@@ -110,7 +104,7 @@ client.on('guildMemberAdd', async (member) => {
   }
 });
 
-// When a member leaves → perma-ban
+// leave → lifetime ban
 client.on('guildMemberRemove', async (member) => {
   const g = member.guild;
   bannedUsers.add(member.id);
@@ -122,19 +116,18 @@ client.on('guildMemberRemove', async (member) => {
   }
 });
 
-// ---------- Slash Command Handler ----------
+// --- Slash commands runtime ---
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-
   const { guild, commandName: cmd } = interaction;
 
-  // Everyone can SEE commands; restrict execution for admin-only here
+  // everyone can see; only admins can execute admin commands
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
     return interaction.reply({ content: '⚠️ You must be an **Admin** to use this command.' });
   }
 
   try {
-    // Help
+    // /bb — help
     if (cmd === 'bb') {
       const emb = new EmbedBuilder()
         .setTitle('BusyPang — Help & Commands')
@@ -157,14 +150,14 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ embeds: [emb] });
     }
 
-    // Check single user's warnings
+    // /warnings — NOW: anyone can check any member (or self if omitted)
     if (cmd === 'warnings') {
-      const user  = interaction.options.getUser('member') || interaction.user;
-      const count = warnings.get(user.id) || 0;
-      return interaction.reply({ content: `🧾 Warnings for <@${user.id}>: **${count}/3**` });
+      const target = interaction.options.getUser('member') || interaction.user;
+      const count = warnings.get(target.id) || 0;
+      return interaction.reply({ content: `🧾 Warnings for <@${target.id}>: **${count}/3**` });
     }
 
-    // Warn
+    // /warn — admin
     if (cmd === 'warn') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
@@ -187,7 +180,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Clear warnings
+    // /clearwarns — admin
     if (cmd === 'clearwarns') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warnings cleared by ${interaction.user.tag}`;
@@ -197,7 +190,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Ban
+    // /ban — admin
     if (cmd === 'ban') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
@@ -212,7 +205,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // Pardon
+    // /pardon — admin
     if (cmd === 'pardon') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Pardoned by ${interaction.user.tag}`;
@@ -228,30 +221,23 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // ------- /banlist (paginated) -------
+    // /banlist — admin, paginated
     if (cmd === 'banlist') {
       const bans = await guild.bans.fetch();
-      bannedUsers.clear();
       const banData = [];
+      bannedUsers.clear();
       for (const [, entry] of bans) {
         bannedUsers.add(entry.user.id);
         banData.push({ id: entry.user.id, tag: entry.user?.tag || '(unknown)' });
       }
-
-      if (banData.length === 0) {
-        return interaction.reply({ content: '📋 No users in the lifetime ban list.' });
-      }
+      if (banData.length === 0) return interaction.reply({ content: '📋 No users in the lifetime ban list.' });
 
       let pages = makePages(banData, PAGE_SIZE_BAN, (u) => `• <@${u.id}> — **${u.tag}** (${u.id})`);
       let page = 0;
       const ids = { prev: 'ban_prev', next: 'ban_next', refresh: 'ban_refresh', close: 'ban_close' };
 
       const msg = await interaction.reply({
-        embeds: [makeEmbed({
-          title: '📋 Lifetime Ban List',
-          desc: pages[page],
-          footer: { text: `Page ${page+1}/${pages.length} • ${banData.length} total` }
-        })],
+        embeds: [makeEmbed({ title: '📋 Lifetime Ban List', desc: pages[page], footer: { text: `Page ${page+1}/${pages.length} • ${banData.length} total` } })],
         components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
         ...NO_PING,
       });
@@ -281,35 +267,24 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           await btn.update({
-            embeds: [makeEmbed({
-              title: '📋 Lifetime Ban List',
-              desc: pages[page],
-              footer: { text: `Page ${page+1}/${pages.length} • ${bannedUsers.size} total` }
-            })],
+            embeds: [makeEmbed({ title: '📋 Lifetime Ban List', desc: pages[page], footer: { text: `Page ${page+1}/${pages.length} • ${bannedUsers.size} total` } })],
             components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
             ...NO_PING,
           });
         } catch {}
       });
 
-      collector.on('end', async () => {
-        try { await msg.edit({ components: [] }); } catch {}
-      });
-
+      collector.on('end', async () => { try { await msg.edit({ components: [] }); } catch {} });
       return;
     }
 
-    // ------- /warnlist (paginated) -------
+    // /warnlist — admin, paginated
     if (cmd === 'warnlist') {
       const entries = [...warnings.entries()]
         .filter(([, count]) => (count || 0) > 0)
         .map(([id, count]) => ({ id, count }));
+      if (entries.length === 0) return interaction.reply({ content: '🧾 No members currently have warnings.' });
 
-      if (entries.length === 0) {
-        return interaction.reply({ content: '🧾 No members currently have warnings.' });
-      }
-
-      // resolve tags, fall back to (unknown)
       const data = [];
       for (const e of entries) {
         try {
@@ -321,21 +296,12 @@ client.on('interactionCreate', async (interaction) => {
       }
       data.sort((a, b) => b.count - a.count);
 
-      let pages = makePages(
-        data,
-        PAGE_SIZE_WARN,
-        (u) => `• <@${u.id}> — **${u.count}/3** (${u.tag}, ${u.id})`
-      );
+      let pages = makePages(data, PAGE_SIZE_WARN, (u) => `• <@${u.id}> — **${u.count}/3** (${u.tag}, ${u.id})`);
       let page = 0;
       const ids = { prev: 'wprev', next: 'wnext', refresh: 'wrefresh', close: 'wclose' };
 
       const msg = await interaction.reply({
-        embeds: [makeEmbed({
-          title: '⚠️ Current Warnings',
-          desc: pages[page],
-          color: 0xff4444,
-          footer: { text: `Page ${page+1}/${pages.length} • ${data.length} members` }
-        })],
+        embeds: [makeEmbed({ title: '⚠️ Current Warnings', desc: pages[page], color: 0xff4444, footer: { text: `Page ${page+1}/${pages.length} • ${data.length} members` } })],
         components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
         ...NO_PING,
       });
@@ -371,31 +337,24 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           await btn.update({
-            embeds: [makeEmbed({
-              title: '⚠️ Current Warnings',
-              desc: pages[page],
-              color: 0xff4444,
-              footer: { text: `Page ${page+1}/${pages.length}` }
-            })],
+            embeds: [makeEmbed({ title: '⚠️ Current Warnings', desc: pages[page], color: 0xff4444, footer: { text: `Page ${page+1}/${pages.length}` } })],
             components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
             ...NO_PING,
           });
         } catch {}
       });
 
-      collector.on('end', async () => {
-        try { await msg.edit({ components: [] }); } catch {}
-      });
-
+      collector.on('end', async () => { try { await msg.edit({ components: [] }); } catch {} });
       return;
     }
-
   } catch (err) {
     console.error(err);
-    if (!interaction.replied) {
-      interaction.reply({ content: '❌ Unexpected error. Try again.' }).catch(() => {});
-    }
+    if (!interaction.replied) interaction.reply({ content: '❌ Unexpected error. Try again.' }).catch(() => {});
   }
 });
 
+if (!TOKEN || !LOG_CHANNEL) {
+  console.error('❌ Missing DISCORD_TOKEN or LOG_CHANNEL env vars.');
+  process.exit(1);
+}
 client.login(TOKEN);
