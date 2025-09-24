@@ -1,8 +1,7 @@
 // BusyPang / Gatekeeper — full runtime
-// Public replies, emojis, per-guild warnings & bans,
+// Public replies (not ephemeral), emojis everywhere, per-guild warnings & bans,
 // paginated /banlist & /warnlist with Prev/Next/Refresh/Close,
-// DM embeds for warn/ban with rules link & moderator name,
-// /pardon now accepts ONLY user_id (string) for lifetime-banned users.
+// DM embeds to warned and auto-banned users (includes moderator + optional rules link).
 
 const {
   Client,
@@ -18,15 +17,15 @@ const express = require('express');
 
 // ===== Environment (Railway variables) =====
 const TOKEN       = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL = process.env.LOG_CHANNEL;      // channel ID where logs are posted
-const RULES_LINK  = process.env.RULES_LINK || ""; // optional: direct link to your rules
+const LOG_CHANNEL = process.env.LOG_CHANNEL;          // channel ID for logs
+const RULES_LINK  = process.env.RULES_LINK || "";     // optional: https://yourserver/rules
 
 if (!TOKEN || !LOG_CHANNEL) {
   console.error('❌ Missing env vars. Set DISCORD_TOKEN and LOG_CHANNEL.');
   process.exit(1);
 }
 
-// ===== Keepalive for Railway/Render/etc. =====
+// ===== Keepalive for Railway =====
 const app = express();
 const PORT = process.env.PORT || 3000;
 app.get('/', (_req, res) => res.send('🟢 BusyPang is running.'));
@@ -44,8 +43,10 @@ const client = new Client({
 });
 
 // ===== State (in-memory) =====
-const bannedUsers = new Set();            // global cache of banned IDs
-const warningsByGuild = new Map();        // Map<guildId, Map<userId, count>>
+// Global cache of banned IDs (helps fast re-ban on rejoin). We still live-fetch for /banlist.
+const bannedUsers = new Set();
+// Per-guild warnings: Map<guildId, Map<userId, count>>
+const warningsByGuild = new Map();
 
 const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'warnlist', 'clearwarns']);
 const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
@@ -83,7 +84,10 @@ function controlsRow(disabled = false) {
     new ButtonBuilder().setCustomId('pg_close').setLabel('✖ Close').setStyle(ButtonStyle.Danger).setDisabled(disabled),
   );
 }
-/** Public paginator. Only the invoker can press the controls. */
+/**
+ * Public paginator. Only the invoker can press the controls.
+ * supplier: async () => string[]  (called again on Refresh)
+ */
 async function sendPaginator(interaction, { title, perPage = 15, color, supplier, guardUserId }) {
   let page = 0;
   let lines = await supplier();
@@ -133,7 +137,7 @@ async function sendPaginator(interaction, { title, perPage = 15, color, supplier
   });
 }
 
-// ===== Boot / Sync bans =====
+// ===== Boot / Sync live bans into cache =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   for (const [, guild] of client.guilds.cache) {
@@ -147,6 +151,7 @@ client.once('ready', async () => {
   }
 });
 
+// Keep cache in sync with ban/unban
 client.on('guildBanAdd', (ban) => bannedUsers.add(ban.user.id));
 client.on('guildBanRemove', (ban) => bannedUsers.delete(ban.user.id));
 
@@ -184,7 +189,7 @@ client.on('interactionCreate', async (interaction) => {
   const { guild, commandName: cmd } = interaction;
   if (!guild) return;
 
-  // show commands to everyone, but restrict execution of admin ones
+  // Show commands to everyone, but restrict execution of admin ones
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
     return interaction.reply({ content: '⛔ You must be an **Admin** to use this command.' });
   }
@@ -205,7 +210,7 @@ client.on('interactionCreate', async (interaction) => {
             '`/warn @user [reason]` — Add warning (3 = auto-ban)',
             '`/clearwarns @user [reason]` — Reset warnings to 0',
             '`/ban @user [reason]` — Ban immediately',
-            '`/pardon user_id:<id> [reason]` — Unban by **user ID** (Reset warnings to 0 , and allow rejoining (Admins only))',
+            '`/pardon user_id:<ID> [reason]` — Unban by **User ID** (resets warnings to 0 & allows rejoining)',
             '`/banlist` — Show lifetime ban list (paged)',
             '`/warnlist` — Show warning list (paged)',
           ].join('\n')
@@ -221,7 +226,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `🧾 **${target.tag}** has **${count}/3** warning(s).` });
     }
 
-    // --- /warn : admin only (mention + DM embed with rules link & moderator) ---
+    // --- /warn : admin (mention + DM embed with rules link) ---
     if (cmd === 'warn') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
@@ -235,7 +240,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply(`⚠️ Warned **${user}** — now at **${next}/3**. 📝 ${reason}`);
       log(guild, `⚠️ **${interaction.user.tag}** warned **<@${user.id}>** — ${next}/3. 📝 ${reason}`);
 
-      // DM the warned user
+      // DM the warned user (embed box)
       try {
         const dmEmbed = new EmbedBuilder()
           .setColor(0xFFA500)
@@ -244,40 +249,47 @@ client.on('interactionCreate', async (interaction) => {
           .addFields(
             { name: "Reason", value: reason || "No reason provided.", inline: false },
             { name: "Warning Count", value: `${next}/3`, inline: true },
-            { name: "Warned By", value: interaction.user.tag, inline: true }
+            { name: "Moderator", value: `${interaction.user.tag}`, inline: true },
           )
           .setFooter({ text: "Please follow the server rules to avoid further action." })
           .setTimestamp();
-        if (RULES_LINK) dmEmbed.addFields({ name: "📜 Server Rules", value: `[Click here to read the rules](${RULES_LINK})`, inline: false });
-        await user.send({ embeds: [dmEmbed] }).catch(() => {});
-      } catch {}
 
-      // Auto-ban at 3 (lifetime)
+        if (RULES_LINK) {
+          dmEmbed.addFields({ name: "📜 Server Rules", value: `[Click here to read the rules](${RULES_LINK})`, inline: false });
+        }
+
+        await user.send({ embeds: [dmEmbed] });
+      } catch {/* DMs closed */}
+
+      // Auto-ban at 3
       if (next >= 3) {
-        try {
-          // DM about the permanent ban
-          const banDm = new EmbedBuilder()
-            .setColor(0xD32F2F)
-            .setTitle("🚫 You Have Been Permanently Banned")
-            .setDescription(`You have reached **3 warnings** in **${guild.name}**.`)
-            .addFields(
-              { name: "Policy", value: "3 warnings = lifetime ban.", inline: false },
-              { name: "Reason", value: reason || "No reason provided.", inline: false },
-              { name: "Banned By", value: interaction.user.tag, inline: true }
-            )
-            .setTimestamp();
-          if (RULES_LINK) banDm.addFields({ name: "📜 Server Rules", value: `[Review the rules here](${RULES_LINK})`, inline: false });
-          await user.send({ embeds: [banDm] }).catch(() => {});
-        } catch {}
-
         bannedUsers.add(user.id);
         try {
-          await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (${reason})` });
-          await interaction.followUp(`⛔ **${user}** reached **3/3** warnings and was **permanently banned**.`);
-          log(guild, `🚫 Auto-banned **<@${user.id}>** at 3 warnings. Moderator: **${interaction.user.tag}**.`);
+          await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (by ${interaction.user.tag})` });
+
+          // DM about the ban
+          try {
+            const banEmbed = new EmbedBuilder()
+              .setColor(0xE53935)
+              .setTitle("🚫 You Have Been Banned")
+              .setDescription(`You have been **banned** from **${guild.name}**.`)
+              .addFields(
+                { name: "Reason", value: `3 warnings (auto-ban). Last reason: ${reason}`, inline: false },
+                { name: "Moderator", value: `${interaction.user.tag}`, inline: true },
+                { name: "Type", value: "Lifetime ban", inline: true },
+              )
+              .setTimestamp();
+            if (RULES_LINK) {
+              banEmbed.addFields({ name: "📜 Server Rules", value: `[Review the rules here](${RULES_LINK})`, inline: false });
+            }
+            await user.send({ embeds: [banEmbed] }).catch(() => {});
+          } catch {/* ignore DM error */}
+
+          log(guild, `🚫 Auto-banned **<@${user.id}>** at 3 warnings. (by ${interaction.user.tag})`);
+          await interaction.followUp(`🚫 **${user}** has reached **3/3** warnings and was **banned for life**.`);
         } catch {
-          await interaction.followUp('⚠️ Tried to auto-ban, but failed — check the bot’s role/permissions.');
           log(guild, `⚠️ Could not auto-ban **<@${user.id}>** — check role/permissions.`);
+          await interaction.followUp('⚠️ Reached 3 warnings, but I could not ban the user — check my role/permissions.');
         }
       }
       return;
@@ -299,25 +311,28 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'ban') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
-
-      // DM before ban
-      try {
-        const banDm = new EmbedBuilder()
-          .setColor(0xD32F2F)
-          .setTitle("🚫 You Have Been Permanently Banned")
-          .setDescription(`You have been banned from **${guild.name}**.`)
-          .addFields(
-            { name: "Reason", value: reason || "No reason provided.", inline: false },
-            { name: "Banned By", value: interaction.user.tag, inline: true }
-          )
-          .setTimestamp();
-        if (RULES_LINK) banDm.addFields({ name: "📜 Server Rules", value: `[Review the rules here](${RULES_LINK})`, inline: false });
-        await user.send({ embeds: [banDm] }).catch(() => {});
-      } catch {}
-
       bannedUsers.add(user.id);
       try {
         await guild.members.ban(user.id, { reason });
+
+        // DM ban notice
+        try {
+          const banEmbed = new EmbedBuilder()
+            .setColor(0xE53935)
+            .setTitle("🚫 You Have Been Banned")
+            .setDescription(`You have been **banned** from **${guild.name}**.`)
+            .addFields(
+              { name: "Reason", value: reason, inline: false },
+              { name: "Moderator", value: `${interaction.user.tag}`, inline: true },
+              { name: "Type", value: "Lifetime ban", inline: true },
+            )
+            .setTimestamp();
+          if (RULES_LINK) {
+            banEmbed.addFields({ name: "📜 Server Rules", value: `[Review the rules here](${RULES_LINK})`, inline: false });
+          }
+          await user.send({ embeds: [banEmbed] }).catch(() => {});
+        } catch {/* ignore DM error */}
+
         await interaction.reply(`🚫 Banned **${user}**. 📝 ${reason}`);
         log(guild, `🚫 **${interaction.user.tag}** banned **<@${user.id}>**. 📝 ${reason}`);
       } catch {
@@ -326,38 +341,22 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // --- /pardon : admin — user_id ONLY ---
+    // --- /pardon : admin (by user ID) ---
     if (cmd === 'pardon') {
-      const rawId  = interaction.options.getString('user_id'); // required in schema
+      const userId = interaction.options.getString('user_id'); // string input (ID)
       const reason = interaction.options.getString('reason') || `Pardon issued by ${interaction.user.tag}`;
 
-      const userId = rawId ? rawId.replace(/[^\d]/g, '') : null;
-      if (!userId) {
-        return interaction.reply({ content: '⚠️ Please provide a valid numeric **user_id** to pardon.' });
-      }
-
-      // Try to fetch a User object for nicer output; ok if it fails
-      let userTag = userId;
-      try {
-        const u = await client.users.fetch(userId);
-        userTag = u?.tag || userId;
-      } catch {}
-
-      // Remove from lifetime cache + clear warnings
       bannedUsers.delete(userId);
       const warnMap = getGuildWarnings(guild.id);
       warnMap.set(userId, 0);
 
-      // Attempt unban
       try {
         await guild.bans.remove(userId, reason);
-        await interaction.reply(`✅ Pardoned **<@${userId}>** (${userTag}). 📝 ${reason}`);
-        log(guild, `✅ **${interaction.user.tag}** pardoned **<@${userId}>** (${userTag}). 📝 ${reason}`);
-      } catch (e) {
-        await interaction.reply({
-          content: '⚠️ Could not unban that user. They may not be banned, or the bot lacks permission.'
-        });
-        log(guild, `⚠️ Failed to pardon **<@${userId}>** (${userTag}). ${e?.message || e}`);
+        await interaction.reply(`✅ Pardoned <@${userId}>. 📝 ${reason}`);
+        log(guild, `✅ **${interaction.user.tag}** pardoned <@${userId}>. 📝 ${reason}`);
+      } catch (err) {
+        console.error(err);
+        await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).' });
       }
       return;
     }
