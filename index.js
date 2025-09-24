@@ -33,20 +33,23 @@ const client = new Client({
 const bannedUsers = new Set();   // lifetime ban IDs
 const warnings    = new Map();   // userId -> count
 
-const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'clearwarns', 'warningslist']);
-const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+const ADMIN_CMDS = new Set([
+  'warn', 'ban', 'pardon', 'banlist', 'clearwarns', 'warnlist'
+]);
+const isAdmin = (i) =>
+  i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 
 // mention without ping (clickable @, quiet)
 const NO_PING = { allowedMentions: { parse: [], users: [] } };
 
 // ---------- helpers ----------
+const PAGE_SIZE_BAN  = 15; // ban entries per page
+const PAGE_SIZE_WARN = 10; // warning entries per page
+
 const log = (guild, content) => {
   const ch = guild.channels.cache.get(LOG_CHANNEL);
   if (ch) ch.send({ content, ...NO_PING }).catch(() => {});
 };
-
-const PAGE_SIZE_BAN = 15;   // ban entries per page
-const PAGE_SIZE_WARN = 10;  // warning entries per page
 
 function makePages(items, perPage, lineBuilder) {
   const pages = [];
@@ -65,7 +68,6 @@ function makeEmbed({ title, desc, color = 0xffbf00, footer }) {
 }
 
 function makeRow(ids, disabled = {}) {
-  // ids: { prev, next, refresh, close }
   return new ActionRowBuilder().addComponents(
     new ButtonBuilder().setCustomId(ids.prev).setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(!!disabled.prev),
     new ButtonBuilder().setCustomId(ids.next).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(!!disabled.next),
@@ -77,8 +79,6 @@ function makeRow(ids, disabled = {}) {
 // ---------- ready ----------
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-
-  // Sync bans for each guild the bot is in
   for (const [, guild] of client.guilds.cache) {
     try {
       const bans = await guild.bans.fetch();
@@ -102,7 +102,7 @@ client.on('guildMemberAdd', async (member) => {
     try {
       await g.members.ban(member.id, { reason: 'Rejoined after leaving (lifetime ban)' });
       log(g, `🚫 **${member.user.tag}** tried to rejoin and was banned.`);
-    } catch (e) {
+    } catch {
       log(g, `⚠️ Could not ban **${member.user.tag}** — check bot role/permissions.`);
     }
   } else {
@@ -117,7 +117,7 @@ client.on('guildMemberRemove', async (member) => {
   log(g, `❌ **${member.user.tag}** left the server — banning for life...`);
   try {
     await g.members.ban(member.id, { reason: 'Left the server (lifetime ban)' });
-  } catch (e) {
+  } catch {
     log(g, `⚠️ Could not ban **${member.user.tag}** — check bot role/permissions.`);
   }
 });
@@ -128,12 +128,13 @@ client.on('interactionCreate', async (interaction) => {
 
   const { guild, commandName: cmd } = interaction;
 
-  // Visible to all; restrict execution here
+  // Everyone can SEE commands; restrict execution for admin-only here
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
     return interaction.reply({ content: '⚠️ You must be an **Admin** to use this command.' });
   }
 
   try {
+    // Help
     if (cmd === 'bb') {
       const emb = new EmbedBuilder()
         .setTitle('BusyPang — Help & Commands')
@@ -149,19 +150,21 @@ client.on('interactionCreate', async (interaction) => {
             '`/clearwarns @user [reason]` — Reset warnings to 0',
             '`/ban @user [reason]` — Ban immediately',
             '`/pardon @user [reason]` — Unban + remove from lifetime list',
-            '`/banlist` — Show lifetime ban list (with pages)',
-            '`/warningslist` — Show all users with warnings (with pages)',
+            '`/banlist` — Show lifetime ban list (paged)',
+            '`/warnlist` — Show all users with warnings (paged)',
           ].join('\n')
         );
       return interaction.reply({ embeds: [emb] });
     }
 
+    // Check single user's warnings
     if (cmd === 'warnings') {
       const user  = interaction.options.getUser('member') || interaction.user;
       const count = warnings.get(user.id) || 0;
       return interaction.reply({ content: `🧾 Warnings for <@${user.id}>: **${count}/3**` });
     }
 
+    // Warn
     if (cmd === 'warn') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
@@ -176,7 +179,7 @@ client.on('interactionCreate', async (interaction) => {
         bannedUsers.add(user.id);
         try {
           await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (${reason})` });
-          log(guild, `🚫 Auto-banned **${(await client.users.fetch(user.id)).tag}** (${user.id}) at 3 warnings.`);
+          log(guild, `🚫 Auto-banned <@${user.id}> at 3 warnings.`);
         } catch {
           log(guild, `⚠️ Could not auto-ban **${user.id}** — check role/permissions.`);
         }
@@ -184,6 +187,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    // Clear warnings
     if (cmd === 'clearwarns') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warnings cleared by ${interaction.user.tag}`;
@@ -193,6 +197,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    // Ban
     if (cmd === 'ban') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
@@ -207,6 +212,7 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    // Pardon
     if (cmd === 'pardon') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Pardoned by ${interaction.user.tag}`;
@@ -222,19 +228,18 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // ------- /banlist (paginated embeds) -------
+    // ------- /banlist (paginated) -------
     if (cmd === 'banlist') {
       const bans = await guild.bans.fetch();
       bannedUsers.clear();
-      for (const [id] of bans) bannedUsers.add(id);
-
-      if (!bans || bans.size === 0) {
-        return interaction.reply({ content: '📋 No users in the lifetime ban list.' });
-      }
-
       const banData = [];
       for (const [, entry] of bans) {
+        bannedUsers.add(entry.user.id);
         banData.push({ id: entry.user.id, tag: entry.user?.tag || '(unknown)' });
+      }
+
+      if (banData.length === 0) {
+        return interaction.reply({ content: '📋 No users in the lifetime ban list.' });
       }
 
       let pages = makePages(banData, PAGE_SIZE_BAN, (u) => `• <@${u.id}> — **${u.tag}** (${u.id})`);
@@ -242,7 +247,11 @@ client.on('interactionCreate', async (interaction) => {
       const ids = { prev: 'ban_prev', next: 'ban_next', refresh: 'ban_refresh', close: 'ban_close' };
 
       const msg = await interaction.reply({
-        embeds: [makeEmbed({ title: '📋 Lifetime Ban List', desc: pages[page], footer: { text: `Page ${page+1}/${pages.length} • ${banData.length} total` } })],
+        embeds: [makeEmbed({
+          title: '📋 Lifetime Ban List',
+          desc: pages[page],
+          footer: { text: `Page ${page+1}/${pages.length} • ${banData.length} total` }
+        })],
         components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
         ...NO_PING,
       });
@@ -258,9 +267,12 @@ client.on('interactionCreate', async (interaction) => {
           else if (btn.customId === ids.next) page = Math.min(pages.length - 1, page + 1);
           else if (btn.customId === ids.refresh) {
             const fresh = await guild.bans.fetch();
-            bannedUsers.clear();
             const freshData = [];
-            for (const [, e] of fresh) freshData.push({ id: e.user.id, tag: e.user?.tag || '(unknown)' });
+            bannedUsers.clear();
+            for (const [, e] of fresh) {
+              bannedUsers.add(e.user.id);
+              freshData.push({ id: e.user.id, tag: e.user?.tag || '(unknown)' });
+            }
             pages = makePages(freshData, PAGE_SIZE_BAN, (u) => `• <@${u.id}> — **${u.tag}** (${u.id})`);
             page = Math.min(page, pages.length - 1);
           } else if (btn.customId === ids.close) {
@@ -269,7 +281,11 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           await btn.update({
-            embeds: [makeEmbed({ title: '📋 Lifetime Ban List', desc: pages[page], footer: { text: `Page ${page+1}/${pages.length} • ${bannedUsers.size} total` } })],
+            embeds: [makeEmbed({
+              title: '📋 Lifetime Ban List',
+              desc: pages[page],
+              footer: { text: `Page ${page+1}/${pages.length} • ${bannedUsers.size} total` }
+            })],
             components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
             ...NO_PING,
           });
@@ -283,9 +299,8 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // ------- NEW: /warningslist (paginated embeds) -------
-    if (cmd === 'warningslist') {
-      // Build an array of users who currently have warnings > 0
+    // ------- /warnlist (paginated) -------
+    if (cmd === 'warnlist') {
       const entries = [...warnings.entries()]
         .filter(([, count]) => (count || 0) > 0)
         .map(([id, count]) => ({ id, count }));
@@ -294,7 +309,7 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({ content: '🧾 No members currently have warnings.' });
       }
 
-      // Try to resolve tags; fallback to unknown
+      // resolve tags, fall back to (unknown)
       const data = [];
       for (const e of entries) {
         try {
@@ -304,8 +319,6 @@ client.on('interactionCreate', async (interaction) => {
           data.push({ id: e.id, tag: '(unknown)', count: e.count });
         }
       }
-
-      // Sort by highest warnings first
       data.sort((a, b) => b.count - a.count);
 
       let pages = makePages(
@@ -314,10 +327,15 @@ client.on('interactionCreate', async (interaction) => {
         (u) => `• <@${u.id}> — **${u.count}/3** (${u.tag}, ${u.id})`
       );
       let page = 0;
-      const ids = { prev: 'warn_prev', next: 'warn_next', refresh: 'warn_refresh', close: 'warn_close' };
+      const ids = { prev: 'wprev', next: 'wnext', refresh: 'wrefresh', close: 'wclose' };
 
       const msg = await interaction.reply({
-        embeds: [makeEmbed({ title: '⚠️ Current Warnings', desc: pages[page], color: 0xff4444, footer: { text: `Page ${page+1}/${pages.length} • ${data.length} members` } })],
+        embeds: [makeEmbed({
+          title: '⚠️ Current Warnings',
+          desc: pages[page],
+          color: 0xff4444,
+          footer: { text: `Page ${page+1}/${pages.length} • ${data.length} members` }
+        })],
         components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
         ...NO_PING,
       });
@@ -332,7 +350,6 @@ client.on('interactionCreate', async (interaction) => {
           if (btn.customId === ids.prev) page = Math.max(0, page - 1);
           else if (btn.customId === ids.next) page = Math.min(pages.length - 1, page + 1);
           else if (btn.customId === ids.refresh) {
-            // refresh from in-memory warnings (they’re live in this process)
             const refreshed = [...warnings.entries()]
               .filter(([, count]) => (count || 0) > 0)
               .map(([id, count]) => ({ id, count }));
@@ -354,7 +371,12 @@ client.on('interactionCreate', async (interaction) => {
           }
 
           await btn.update({
-            embeds: [makeEmbed({ title: '⚠️ Current Warnings', desc: pages[page], color: 0xff4444, footer: { text: `Page ${page+1}/${pages.length} • ${entries.length} members` } })],
+            embeds: [makeEmbed({
+              title: '⚠️ Current Warnings',
+              desc: pages[page],
+              color: 0xff4444,
+              footer: { text: `Page ${page+1}/${pages.length}` }
+            })],
             components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
             ...NO_PING,
           });

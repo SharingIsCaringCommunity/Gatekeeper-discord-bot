@@ -1,11 +1,10 @@
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 require('dotenv').config();
 
-const TOKEN    = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID; // your bot's application ID
-const GUILD_ID  = process.env.GUILD_ID;  // target server for per-guild registration
+const TOKEN     = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID; // your bot application ID
+const GUILD_ID  = process.env.GUILD_ID;  // target guild for per-guild commands
 
-// --- Define Commands ---
 const commands = [
   new SlashCommandBuilder()
     .setName('bb')
@@ -83,25 +82,22 @@ const commands = [
     .setDMPermission(false),
 
   new SlashCommandBuilder()
-    .setName('warningslist')
+    .setName('warnlist')
     .setDescription('Show all members with warnings (Admins only, paginated)')
     .setDMPermission(false),
-].map(cmd => cmd.toJSON());
+].map(c => c.toJSON());
 
-// --- Deploy ---
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
   try {
-    console.log('⏳ Refreshing slash commands...');
-
+    console.log('⏳ Refreshing slash commands (guild)…');
     await rest.put(
       Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
       { body: commands },
     );
-
-    console.log('✅ Successfully reloaded slash commands.');
+    console.log('✅ Slash commands deployed.');
   } catch (err) {
-    console.error('❌ Error reloading commands:', err);
+    console.error('❌ Error deploying commands:', err);
   }
 })();
