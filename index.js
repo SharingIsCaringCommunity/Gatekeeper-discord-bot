@@ -1,204 +1,233 @@
-// index.js — BusyPang Bot v1.5.3
-// Env: DISCORD_TOKEN, LOG_CHANNEL
-
+// CommonJS runtime
 const {
   Client,
   GatewayIntentBits,
   PermissionsBitField,
   EmbedBuilder,
-} = require("discord.js");
-const express = require("express");
+} = require('discord.js');
+const express = require('express');
 
-const TOKEN = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL_ID = process.env.LOG_CHANNEL;
+const TOKEN        = process.env.DISCORD_TOKEN;
+const LOG_CHANNEL  = process.env.LOG_CHANNEL;
 
-// Keepalive
+// --- Keepalive (Railway-friendly) ---
 const app = express();
-app.get("/", (_req, res) => res.send("BusyPang Bot is running."));
-app.listen(3000, () => console.log("✅ Web server running on port 3000"));
+app.get('/', (_req, res) => res.send('BusyPang is running.'));
+app.listen(3000, () => console.log('✅ Web server running on port 3000'));
 
+// --- Discord Client ---
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildMembers,
-    GatewayIntentBits.GuildModeration,
     GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
-let bannedUsers = new Set();
-let warnings = new Map();
+// In-memory stores (simple)
+const bannedUsers  = new Set();             // lifetime ban IDs
+const warnings     = new Map();             // userId -> count (0..3)
 
-const isAdmin = (m) => m.permissions.has(PermissionsBitField.Flags.Administrator);
-const warnCountString = (n) => `${n}/3`;
-const log = (guild, msg) => guild?.channels.cache.get(LOG_CHANNEL_ID)?.send(msg);
+const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'clearwarns']);
 
-// Sync bans
-async function syncBansForGuild(guild) {
-  try {
-    const bans = await guild.bans.fetch();
-    bannedUsers.clear();
-    for (const [id] of bans) bannedUsers.add(id);
-    console.log(`🔄 Synced ${bans.size} banned IDs for ${guild.name}`);
-  } catch (e) {
-    console.error("Failed to fetch bans:", e?.message || e);
-  }
+function isAdmin(interaction) {
+  return interaction.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 }
 
-client.on("guildBanAdd", (ban) => bannedUsers.add(ban.user.id));
-client.on("guildBanRemove", (ban) => bannedUsers.delete(ban.user.id));
+function log(guild, content) {
+  const ch = guild.channels.cache.get(LOG_CHANNEL);
+  if (ch) ch.send({ content }).catch(() => {});
+}
 
-client.once("ready", async () => {
+client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
-  const guild = client.guilds.cache.first();
-  if (guild) await syncBansForGuild(guild);
-});
 
-// Auto ban on rejoin/leave
-client.on("guildMemberAdd", async (member) => {
-  if (bannedUsers.has(member.id)) {
+  // Sync bans from the first guild (or all guilds if you run multi-guild)
+  for (const [, guild] of client.guilds.cache) {
     try {
-      await member.guild.members.ban(member.id, { reason: "Rejoined after leaving (lifetime ban)" });
-      log(member.guild, `🚫 **${member.user.tag}** tried to rejoin and was banned.`);
-    } catch {
-      log(member.guild, `⚠️ Could not ban **${member.user.tag}** — role too low.`);
+      const bans = await guild.bans.fetch();
+      bannedUsers.clear();
+      for (const [id] of bans) bannedUsers.add(id);
+      console.log(`🔄 Synced ${bans.size} bans for ${guild.name}`);
+    } catch (e) {
+      console.log(`⚠️ Failed to fetch bans for ${guild.name}:`, e?.message || e);
     }
   }
 });
 
-client.on("guildMemberRemove", async (member) => {
-  bannedUsers.add(member.id);
-  log(member.guild, `❌ **${member.user.tag}** left.\n🚫 Now banned for life.`);
-  try {
-    await member.guild.members.ban(member.id, { reason: "Left the server (lifetime ban)" });
-  } catch {
-    log(member.guild, `⚠️ Could not ban **${member.user.tag}** — role too low.`);
+// Keep lifetime list updated in real time
+client.on('guildBanAdd', (ban) => bannedUsers.add(ban.user.id));
+client.on('guildBanRemove', (ban) => bannedUsers.delete(ban.user.id));
+
+// Auto-ban if a banned user rejoins
+client.on('guildMemberAdd', async (member) => {
+  const g = member.guild;
+  if (bannedUsers.has(member.id)) {
+    try {
+      await g.members.ban(member.id, { reason: 'Rejoined after leaving (lifetime ban)' });
+      log(g, `🚫 **${member.user.tag}** tried to rejoin and was banned.`);
+    } catch (e) {
+      log(g, `⚠️ Could not ban **${member.user.tag}** — check bot role/permissions.`);
+    }
+  } else {
+    log(g, `✅ **${member.user.tag}** joined the server.`);
   }
 });
 
-// Slash command handling
-client.on("interactionCreate", async (interaction) => {
-  if (!interaction.isCommand()) return;
-  const { commandName } = interaction;
-  const guild = interaction.guild;
-  const fail = (msg) => interaction.reply({ content: msg, ephemeral: true });
+// When a member leaves → perma-ban
+client.on('guildMemberRemove', async (member) => {
+  const g = member.guild;
+  bannedUsers.add(member.id);
+  log(g, `❌ **${member.user.tag}** left the server — banning for life...`);
+  try {
+    await g.members.ban(member.id, { reason: 'Left the server (lifetime ban)' });
+  } catch (e) {
+    log(g, `⚠️ Could not ban **${member.user.tag}** — check bot role/permissions.`);
+  }
+});
 
-  // /warn
-  if (commandName === "warn") {
-    if (!isAdmin(interaction.member)) return fail("❌ Only admins can issue warnings.");
-    const user = interaction.options.getUser("member", true);
-    const reason = interaction.options.getString("reason") || `Warned by ${interaction.user.tag}`;
+// --- Slash Commands ---
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
 
-    let count = warnings.get(user.id) || 0;
-    count++;
-    warnings.set(user.id, count);
+  const { commandName: cmd, guild } = interaction;
 
-    if (count >= 3) {
-      bannedUsers.add(user.id);
-      try {
-        await guild.members.ban(user.id, { reason: `Reached 3 warnings: ${reason}` });
-        await interaction.reply(`🚫 **${user.tag}** banned after 3 warnings.\n📝 Reason: ${reason}`);
-        log(guild, `🚫 **${interaction.user.tag}** banned **${user.tag}** after 3 warnings.\n📝 ${reason}`);
-      } catch {
-        await fail("⚠️ Could not ban this user — bot role too low.");
+  // Everyone can see commands; restrict execution for admin-only set
+  if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
+    return interaction.reply({
+      content: '⚠️ You must be an **Admin** to use this command.',
+      ephemeral: true,
+    });
+  }
+
+  try {
+    if (cmd === 'bb') {
+      const emb = new EmbedBuilder()
+        .setTitle('BusyPang — Help & Commands')
+        .setColor(0x00b3ff)
+        .setDescription(
+          [
+            '### 👥 Everyone',
+            '`/warnings [@user]` — Check warnings',
+            '`/bb` — Show this help',
+            '',
+            '### 🛡️ Admin only',
+            '`/warn @user [reason]` — Add warning (3 = auto-ban)',
+            '`/clearwarns @user [reason]` — Reset warnings to 0',
+            '`/ban @user [reason]` — Ban immediately',
+            '`/pardon @user [reason]` — Unban + remove from lifetime list',
+            '`/banlist` — Show lifetime ban list',
+          ].join('\n')
+        );
+      return interaction.reply({ embeds: [emb], ephemeral: true });
+    }
+
+    if (cmd === 'warnings') {
+      const user = interaction.options.getUser('member') || interaction.user;
+      const count = warnings.get(user.id) || 0;
+      return interaction.reply({
+        content: `🧾 **${user.tag}** has **${count}/3** warning(s).`,
+        ephemeral: true,
+      });
+    }
+
+    if (cmd === 'warn') {
+      const user = interaction.options.getUser('member');
+      const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
+      const current = warnings.get(user.id) || 0;
+      const next = Math.min(3, current + 1);
+      warnings.set(user.id, next);
+
+      await interaction.reply(`⚠️ Warned **${user.tag}** — now at **${next}/3**. Reason: ${reason}`);
+      log(guild, `⚠️ **${interaction.user.tag}** warned **<@${user.id}>** (${user.id}) — ${next}/3. 📝 ${reason}`);
+
+      if (next >= 3) {
+        bannedUsers.add(user.id);
+        try {
+          await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (${reason})` });
+          log(guild, `🚫 Auto-banned **<@${user.id}>** at 3 warnings.`);
+        } catch (e) {
+          log(guild, `⚠️ Could not auto-ban **<@${user.id}>** — check role/permissions.`);
+        }
       }
       return;
     }
 
-    await interaction.reply(`⚠️ **${user.tag}** warned. (${warnCountString(count)})\n📝 Reason: ${reason}`);
-    log(guild, `⚠️ **${interaction.user.tag}** warned **${user.tag}** (${warnCountString(count)})\n📝 ${reason}`);
-    return;
-  }
-
-  // /warnings
-  if (commandName === "warnings") {
-    const user = interaction.options.getUser("member") || interaction.user;
-    const count = warnings.get(user.id) || 0;
-    await interaction.reply(`📋 **${user.tag}** has ${warnCountString(count)} warnings.`);
-    return;
-  }
-
-  // /clearwarns
-  if (commandName === "clearwarns") {
-    if (!isAdmin(interaction.member)) return fail("❌ Only admins can clear warnings.");
-    const user = interaction.options.getUser("member", true);
-    const reason = interaction.options.getString("reason") || `Warnings cleared by ${interaction.user.tag}`;
-    warnings.delete(user.id);
-    await interaction.reply(`✅ Cleared all warnings for **${user.tag}**.\n📝 Reason: ${reason}`);
-    log(guild, `✅ **${interaction.user.tag}** cleared warnings for **${user.tag}**\n📝 ${reason}`);
-    return;
-  }
-
-  // /ban
-  if (commandName === "ban") {
-    if (!isAdmin(interaction.member)) return fail("❌ Only admins can ban.");
-    const user = interaction.options.getUser("member", true);
-    const reason = interaction.options.getString("reason") || `Manual ban by ${interaction.user.tag}`;
-    bannedUsers.add(user.id);
-    try {
-      await guild.members.ban(user.id, { reason });
-      await interaction.reply(`🚫 Banned **${user.tag}**.\n📝 Reason: ${reason}`);
-      log(guild, `🚫 **${interaction.user.tag}** banned **${user.tag}**\n📝 ${reason}`);
-    } catch {
-      await fail("⚠️ Could not ban this user — bot role too low.");
+    if (cmd === 'clearwarns') {
+      const user = interaction.options.getUser('member');
+      const reason = interaction.options.getString('reason') || `Warnings cleared by ${interaction.user.tag}`;
+      warnings.set(user.id, 0);
+      await interaction.reply(`🧹 Cleared warnings for **${user.tag}**. 📝 ${reason}`);
+      log(guild, `🧹 **${interaction.user.tag}** cleared warnings for **<@${user.id}>**. 📝 ${reason}`);
+      return;
     }
-    return;
-  }
 
-  // /pardon
-  if (commandName === "pardon") {
-    if (!isAdmin(interaction.member)) return fail("❌ Only admins can pardon.");
-    const user = interaction.options.getUser("member", true);
-    const reason = interaction.options.getString("reason") || `Pardon issued by ${interaction.user.tag}`;
-    bannedUsers.delete(user.id);
-    warnings.delete(user.id);
-    try {
-      await guild.bans.remove(user.id, reason);
-      await interaction.reply(`✅ Pardoned **${user.tag}**.\n📝 Reason: ${reason}`);
-      log(guild, `✅ **${interaction.user.tag}** pardoned **${user.tag}**\n📝 ${reason}`);
-    } catch {
-      await fail("⚠️ Could not unban this user — maybe not banned?");
-    }
-    return;
-  }
-
-  // /banlist
-  if (commandName === "banlist") {
-    if (!isAdmin(interaction.member)) return fail("❌ Only admins can view the ban list.");
-    if (bannedUsers.size === 0) return interaction.reply("📋 No users in the lifetime ban list.");
-
-    const ids = [...bannedUsers];
-    const lines = [];
-    for (const id of ids) {
+    if (cmd === 'ban') {
+      const user = interaction.options.getUser('member');
+      const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
+      bannedUsers.add(user.id);
       try {
-        const u = await client.users.fetch(id);
-        lines.push(`**${u.tag}** (${id})`);
+        await guild.members.ban(user.id, { reason });
+        await interaction.reply(`🚫 Banned **${user.tag}**. 📝 ${reason}`);
+        log(guild, `🚫 **${interaction.user.tag}** banned **<@${user.id}>**. 📝 ${reason}`);
       } catch {
-        lines.push(`(unknown user) (${id})`);
+        await interaction.reply({ content: '⚠️ Could not ban that user (role/permissions?).', ephemeral: true });
       }
+      return;
     }
 
-    await interaction.reply("📋 **Banned Members:**\n" + lines.join("\n"));
-    return;
-  }
+    if (cmd === 'pardon') {
+      const user = interaction.options.getUser('member');
+      const reason = interaction.options.getString('reason') || `Pardon issued by ${interaction.user.tag}`;
+      bannedUsers.delete(user.id);
+      warnings.set(user.id, 0);
+      try {
+        await guild.bans.remove(user.id, reason);
+        await interaction.reply(`✅ Pardoned **${user.tag}**. 📝 ${reason}`);
+        log(guild, `✅ **${interaction.user.tag}** pardoned **<@${user.id}>**. 📝 ${reason}`);
+      } catch {
+        await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).', ephemeral: true });
+      }
+      return;
+    }
 
-  // /bb (help)
-  if (commandName === "bb") {
-    const help = new EmbedBuilder()
-      .setTitle("🤖 BusyPang Bot — Commands")
-      .setDescription(
-        [
-          "`/warn @member [reason]` – Warn a member (3 warnings = auto-ban) **Admin only**",
-          "`/warnings [@member]` – Check warnings (anyone)",
-          "`/clearwarns @member [reason]` – Reset warnings **Admin only**",
-          "`/ban @member [reason]` – Manual ban **Admin only**",
-          "`/pardon @member [reason]` – Unban & reset warnings **Admin only**",
-          "`/banlist` – Show lifetime-banned users **Admin only**",
-          "`/bb` – Show this help",
-        ].join("\n")
-      )
-      .setColor(0xffcc00);
-    await interaction.reply({ embeds: [help], ephemeral: true });
+    if (cmd === 'banlist') {
+      if (bannedUsers.size === 0) {
+        return interaction.reply({ content: '📋 No users in the lifetime ban list.', ephemeral: true });
+      }
+      // Resolve tags for nicer output
+      const ids = [...bannedUsers];
+      const lines = [];
+      for (const id of ids) {
+        try {
+          const u = await client.users.fetch(id);
+          lines.push(`• **${u.tag}** (<@${id}>)`);
+        } catch {
+          lines.push(`• (unknown) (<@${id}>)`);
+        }
+      }
+      const chunks = [];
+      let buf = '📋 **Lifetime Ban List**\n' + lines.join('\n');
+      // Discord 2000 char cap safety
+      while (buf.length > 1900) {
+        const cut = buf.lastIndexOf('\n', 1800);
+        chunks.push(buf.slice(0, cut));
+        buf = buf.slice(cut + 1);
+      }
+      chunks.push(buf);
+
+      for (const c of chunks) {
+        await interaction.reply({ content: c, ephemeral: true });
+      }
+      return;
+    }
+  } catch (err) {
+    console.error(err);
+    if (!interaction.replied) {
+      interaction.reply({ content: '❌ Unexpected error. Try again.', ephemeral: true }).catch(() => {});
+    }
   }
 });
 
