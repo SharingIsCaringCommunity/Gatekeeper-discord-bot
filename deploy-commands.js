@@ -1,25 +1,20 @@
-// deploy-commands.js — Register all slash commands for BusyPang Bot
-
-require('dotenv').config();
+// deploy-commands.js — Register all slash commands for BusyPang Bot (no dotenv)
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
-const TOKEN    = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID; // your bot's application ID
-const GUILD_ID  = process.env.GUILD_ID;  // your server ID (guild)
+const TOKEN     = process.env.DISCORD_TOKEN; // Bot token
+const CLIENT_ID = process.env.CLIENT_ID;     // Application (client) ID
+const GUILD_ID  = process.env.GUILD_ID;      // Target server (guild) ID
 
 if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error("❌ Missing DISCORD_TOKEN, CLIENT_ID, or GUILD_ID in env.");
+  console.error('❌ Missing env: DISCORD_TOKEN, CLIENT_ID, or GUILD_ID.');
   process.exit(1);
 }
 
 const commands = [
-
-  // /bb (help)
   new SlashCommandBuilder()
     .setName('bb')
     .setDescription('Show BusyPang help & commands'),
 
-  // /warnings
   new SlashCommandBuilder()
     .setName('warnings')
     .setDescription('Check your warnings or another member’s')
@@ -28,7 +23,6 @@ const commands = [
          .setDescription('Member to check')
     ),
 
-  // /warn
   new SlashCommandBuilder()
     .setName('warn')
     .setDescription('Add a warning to a member (3 = auto-ban)')
@@ -42,7 +36,6 @@ const commands = [
          .setDescription('Reason for the warning')
     ),
 
-  // /clearwarns
   new SlashCommandBuilder()
     .setName('clearwarns')
     .setDescription('Reset warnings for a member')
@@ -56,7 +49,6 @@ const commands = [
          .setDescription('Reason for clearing warnings')
     ),
 
-  // /ban
   new SlashCommandBuilder()
     .setName('ban')
     .setDescription('Ban a member immediately')
@@ -70,7 +62,6 @@ const commands = [
          .setDescription('Reason for the ban')
     ),
 
-  // /pardon
   new SlashCommandBuilder()
     .setName('pardon')
     .setDescription('Unban and remove from lifetime ban list')
@@ -84,31 +75,24 @@ const commands = [
          .setDescription('Reason for the pardon')
     ),
 
-  // /banlist
   new SlashCommandBuilder()
     .setName('banlist')
-    .setDescription('Show the lifetime ban list'),
+    .setDescription('Show the lifetime ban list (Admins only)'),
 
-  // /warnlist
   new SlashCommandBuilder()
     .setName('warnlist')
-    .setDescription('Show all members with warnings'),
-];
+    .setDescription('Show all members with warnings (Admins only)'),
+].map(c => c.toJSON());
 
-// --- Register ---
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
   try {
-    console.log(`🔄 Refreshing ${commands.length} application (/) commands for guild ${GUILD_ID}...`);
-
-    await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
-      { body: commands.map(cmd => cmd.toJSON()) },
-    );
-
+    console.log(`🔄 Refreshing ${commands.length} commands in guild ${GUILD_ID}...`);
+    await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: commands });
     console.log('✅ Successfully registered application (/) commands.');
   } catch (err) {
     console.error('❌ Error registering commands:', err);
+    process.exit(1);
   }
 })();
