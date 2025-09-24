@@ -91,7 +91,6 @@ client.on('interactionCreate', async (interaction) => {
 
   const { guild, commandName: cmd } = interaction;
 
-  // Visible to all; restrict execution here
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
     return interaction.reply({
       content: '⚠️ You must be an **Admin** to use this command.'
@@ -124,7 +123,7 @@ client.on('interactionCreate', async (interaction) => {
       const user  = interaction.options.getUser('member') || interaction.user;
       const count = warnings.get(user.id) || 0;
       return interaction.reply({
-        content: `🧾 **${user.tag}** has **${count}/3** warning(s).`
+        content: `🧾 Warnings for <@${user.id}>: **${count}/3**`
       });
     }
 
@@ -135,16 +134,16 @@ client.on('interactionCreate', async (interaction) => {
       const next = Math.min(3, current + 1);
       warnings.set(user.id, next);
 
-      await interaction.reply(`⚠️ Warned **${user.tag}** — now at **${next}/3**. Reason: ${reason}`);
-      log(guild, `⚠️ **${interaction.user.tag}** warned **<@${user.id}>** — ${next}/3. 📝 ${reason}`);
+      await interaction.reply(`⚠️ <@${user.id}> has been warned — now at **${next}/3**. 📝 ${reason}`);
+      log(guild, `⚠️ **${interaction.user.tag}** warned <@${user.id}> — ${next}/3. 📝 ${reason}`);
 
       if (next >= 3) {
         bannedUsers.add(user.id);
         try {
           await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (${reason})` });
-          log(guild, `🚫 Auto-banned **<@${user.id}>** at 3 warnings.`);
+          log(guild, `🚫 Auto-banned **${user.tag}** (${user.id}) at 3 warnings.`);
         } catch {
-          log(guild, `⚠️ Could not auto-ban **<@${user.id}>** — check role/permissions.`);
+          log(guild, `⚠️ Could not auto-ban **${user.tag}** — check role/permissions.`);
         }
       }
       return;
@@ -154,8 +153,8 @@ client.on('interactionCreate', async (interaction) => {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warnings cleared by ${interaction.user.tag}`;
       warnings.set(user.id, 0);
-      await interaction.reply(`🧹 Cleared warnings for **${user.tag}**. 📝 ${reason}`);
-      log(guild, `🧹 **${interaction.user.tag}** cleared warnings for **<@${user.id}>**. 📝 ${reason}`);
+      await interaction.reply(`🧹 Cleared warnings for <@${user.id}>. 📝 ${reason}`);
+      log(guild, `🧹 **${interaction.user.tag}** cleared warnings for <@${user.id}>. 📝 ${reason}`);
       return;
     }
 
@@ -165,8 +164,8 @@ client.on('interactionCreate', async (interaction) => {
       bannedUsers.add(user.id);
       try {
         await guild.members.ban(user.id, { reason });
-        await interaction.reply(`🚫 Banned **${user.tag}**. 📝 ${reason}`);
-        log(guild, `🚫 **${interaction.user.tag}** banned **<@${user.id}>**. 📝 ${reason}`);
+        await interaction.reply(`🚫 Banned **${user.tag}** (${user.id}). 📝 ${reason}`);
+        log(guild, `🚫 **${interaction.user.tag}** banned **${user.tag}** (${user.id}). 📝 ${reason}`);
       } catch {
         await interaction.reply({ content: '⚠️ Could not ban that user (role/permissions?).' });
       }
@@ -175,13 +174,13 @@ client.on('interactionCreate', async (interaction) => {
 
     if (cmd === 'pardon') {
       const user   = interaction.options.getUser('member');
-      const reason = interaction.options.getString('reason') || `Pardon issued by ${interaction.user.tag}`;
+      const reason = interaction.options.getString('reason') || `Pardoned by ${interaction.user.tag}`;
       bannedUsers.delete(user.id);
       warnings.set(user.id, 0);
       try {
         await guild.bans.remove(user.id, reason);
-        await interaction.reply(`✅ Pardoned **${user.tag}**. 📝 ${reason}`);
-        log(guild, `✅ **${interaction.user.tag}** pardoned **<@${user.id}>**. 📝 ${reason}`);
+        await interaction.reply(`✅ <@${user.id}> has been pardoned. 📝 ${reason}`);
+        log(guild, `✅ **${interaction.user.tag}** pardoned <@${user.id}>. 📝 ${reason}`);
       } catch {
         await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).' });
       }
@@ -197,9 +196,9 @@ client.on('interactionCreate', async (interaction) => {
       for (const id of ids) {
         try {
           const u = await client.users.fetch(id);
-          lines.push(`• **${u.tag}** (<@${id}>)`);
+          lines.push(`• **${u.tag}** (${id})`);
         } catch {
-          lines.push(`• (unknown) (<@${id}>)`);
+          lines.push(`• (unknown) (${id})`);
         }
       }
       const text = '📋 **Lifetime Ban List**\n' + lines.join('\n');
