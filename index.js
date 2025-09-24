@@ -1,7 +1,7 @@
 // BusyPang / Gatekeeper — full runtime
-// Public replies (not ephemeral), per-guild warnings & bans,
+// Public replies (not ephemeral), emojis everywhere, per-guild warnings & bans,
 // paginated /banlist & /warnlist with Prev/Next/Refresh/Close,
-// DM embed to warned users including rules link (if RULES_LINK is set).
+// DM embed to warned/banned users including rules link and moderator name.
 
 const {
   Client,
@@ -17,7 +17,7 @@ const express = require('express');
 
 // ===== Environment (Railway variables) =====
 const TOKEN       = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL = process.env.LOG_CHANNEL; // channel ID where logs are posted
+const LOG_CHANNEL = process.env.LOG_CHANNEL;     // channel ID where logs are posted
 const RULES_LINK  = process.env.RULES_LINK || ""; // optional: direct link to your rules
 
 if (!TOKEN || !LOG_CHANNEL) {
@@ -226,7 +226,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `🧾 **${target.tag}** has **${count}/3** warning(s).` });
     }
 
-    // --- /warn : admin only (mention + DM embed with rules link) ---
+    // --- /warn : admin only (mention + DM embed with rules link & moderator) ---
     if (cmd === 'warn') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
@@ -240,7 +240,7 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.reply(`⚠️ Warned **${user}** — now at **${next}/3**. 📝 ${reason}`);
       log(guild, `⚠️ **${interaction.user.tag}** warned **<@${user.id}>** — ${next}/3. 📝 ${reason}`);
 
-      // DM the warned user (embed box)
+      // DM the warned user (embed box) — always shows "Warned By"
       try {
         const dmEmbed = new EmbedBuilder()
           .setColor(0xFFA500) // orange
@@ -249,6 +249,7 @@ client.on('interactionCreate', async (interaction) => {
           .addFields(
             { name: "Reason", value: reason || "No reason provided.", inline: false },
             { name: "Warning Count", value: `${next}/3`, inline: true },
+            { name: "Warned By", value: interaction.user.tag, inline: true }
           )
           .setFooter({ text: "Please follow the server rules to avoid further action." })
           .setTimestamp();
@@ -262,31 +263,33 @@ client.on('interactionCreate', async (interaction) => {
         // ignore if DMs are closed
       }
 
-      // Auto-ban at 3 (with DM)
+      // Auto-ban at 3 (lifetime)
       if (next >= 3) {
+        // DM about the permanent ban (with "Banned By")
+        try {
+          const banDm = new EmbedBuilder()
+            .setColor(0xD32F2F) // red
+            .setTitle("🚫 You Have Been Permanently Banned")
+            .setDescription(`You have reached **3 warnings** in **${guild.name}**.`)
+            .addFields(
+              { name: "Policy", value: "3 warnings = lifetime ban.", inline: false },
+              { name: "Reason", value: reason || "No reason provided.", inline: false },
+              { name: "Banned By", value: interaction.user.tag, inline: true },
+            )
+            .setTimestamp();
+          if (RULES_LINK) {
+            banDm.addFields({ name: "📜 Server Rules", value: `[Review the rules here](${RULES_LINK})`, inline: false });
+          }
+          await user.send({ embeds: [banDm] }).catch(() => {});
+        } catch {}
+
         bannedUsers.add(user.id);
         try {
           await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (${reason})` });
-
-          // Try DM after ban (Discord allows DM to mutuals if settings permit)
-          try {
-            const banEmbed = new EmbedBuilder()
-              .setColor(0xD32F2F)
-              .setTitle("🚫 You Have Been Banned")
-              .setDescription(`You were banned from **${guild.name}** after reaching **3/3 warnings**.`)
-              .addFields(
-                { name: "Final Reason", value: reason || "No reason provided.", inline: false },
-                { name: "Policy", value: "3 warnings = permanent ban.", inline: false }
-              )
-              .setTimestamp();
-            if (RULES_LINK) {
-              banEmbed.addFields({ name: "📜 Server Rules", value: `[Review the rules here](${RULES_LINK})`, inline: false });
-            }
-            await user.send({ embeds: [banEmbed] }).catch(() => {});
-          } catch {}
-
-          log(guild, `🚫 Auto-banned **<@${user.id}>** at 3 warnings.`);
+          await interaction.followUp(`⛔ **${user}** reached **3/3** warnings and was **permanently banned**.`);
+          log(guild, `🚫 Auto-banned **<@${user.id}>** at 3 warnings. Moderator: **${interaction.user.tag}**.`);
         } catch {
+          await interaction.followUp('⚠️ Tried to auto-ban, but failed — check the bot’s role/permissions.');
           log(guild, `⚠️ Could not auto-ban **<@${user.id}>** — check role/permissions.`);
         }
       }
@@ -309,6 +312,24 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'ban') {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
+
+      // DM before ban
+      try {
+        const banDm = new EmbedBuilder()
+          .setColor(0xD32F2F)
+          .setTitle("🚫 You Have Been Permanently Banned")
+          .setDescription(`You have been banned from **${guild.name}**.`)
+          .addFields(
+            { name: "Reason", value: reason || "No reason provided.", inline: false },
+            { name: "Banned By", value: interaction.user.tag, inline: true }
+          )
+          .setTimestamp();
+        if (RULES_LINK) {
+          banDm.addFields({ name: "📜 Server Rules", value: `[Review the rules here](${RULES_LINK})`, inline: false });
+        }
+        await user.send({ embeds: [banDm] }).catch(() => {});
+      } catch {}
+
       bannedUsers.add(user.id);
       try {
         await guild.members.ban(user.id, { reason });
