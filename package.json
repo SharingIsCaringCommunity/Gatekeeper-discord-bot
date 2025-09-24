@@ -3,9 +3,7 @@
   "version": "1.6.1",
   "private": true,
   "type": "commonjs",
-  "engines": {
-    "node": ">=18"
-  },
+  "engines": { "node": ">=18" },
   "scripts": {
     "start": "node index.js",
     "deploy": "node deploy-commands.js",
