@@ -1,4 +1,4 @@
-// Runtime — everyone can SEE commands; only admins can USE mod ones.
+// Runtime — everyone can SEE replies (no ephemeral).
 const {
   Client,
   GatewayIntentBits,
@@ -94,8 +94,7 @@ client.on('interactionCreate', async (interaction) => {
   // Visible to all; restrict execution here
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
     return interaction.reply({
-      content: '⚠️ You must be an **Admin** to use this command.',
-      ephemeral: true,
+      content: '⚠️ You must be an **Admin** to use this command.'
     });
   }
 
@@ -118,15 +117,14 @@ client.on('interactionCreate', async (interaction) => {
             '`/banlist` — Show lifetime ban list',
           ].join('\n')
         );
-      return interaction.reply({ embeds: [emb], ephemeral: true });
+      return interaction.reply({ embeds: [emb] });
     }
 
     if (cmd === 'warnings') {
       const user  = interaction.options.getUser('member') || interaction.user;
       const count = warnings.get(user.id) || 0;
       return interaction.reply({
-        content: `🧾 **${user.tag}** has **${count}/3** warning(s).`,
-        ephemeral: true,
+        content: `🧾 **${user.tag}** has **${count}/3** warning(s).`
       });
     }
 
@@ -170,7 +168,7 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply(`🚫 Banned **${user.tag}**. 📝 ${reason}`);
         log(guild, `🚫 **${interaction.user.tag}** banned **<@${user.id}>**. 📝 ${reason}`);
       } catch {
-        await interaction.reply({ content: '⚠️ Could not ban that user (role/permissions?).', ephemeral: true });
+        await interaction.reply({ content: '⚠️ Could not ban that user (role/permissions?).' });
       }
       return;
     }
@@ -185,14 +183,14 @@ client.on('interactionCreate', async (interaction) => {
         await interaction.reply(`✅ Pardoned **${user.tag}**. 📝 ${reason}`);
         log(guild, `✅ **${interaction.user.tag}** pardoned **<@${user.id}>**. 📝 ${reason}`);
       } catch {
-        await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).', ephemeral: true });
+        await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).' });
       }
       return;
     }
 
     if (cmd === 'banlist') {
       if (bannedUsers.size === 0) {
-        return interaction.reply({ content: '📋 No users in the lifetime ban list.', ephemeral: true });
+        return interaction.reply({ content: '📋 No users in the lifetime ban list.' });
       }
       const ids = [...bannedUsers];
       const lines = [];
@@ -205,12 +203,12 @@ client.on('interactionCreate', async (interaction) => {
         }
       }
       const text = '📋 **Lifetime Ban List**\n' + lines.join('\n');
-      return interaction.reply({ content: text.slice(0, 1990), ephemeral: true });
+      return interaction.reply({ content: text.slice(0, 1990) });
     }
   } catch (err) {
     console.error(err);
     if (!interaction.replied) {
-      interaction.reply({ content: '❌ Unexpected error. Try again.', ephemeral: true }).catch(() => {});
+      interaction.reply({ content: '❌ Unexpected error. Try again.' }).catch(() => {});
     }
   }
 });
