@@ -3,13 +3,11 @@
   "version": "1.5.8",
   "private": true,
   "type": "commonjs",
-  "engines": {
-    "node": ">=18"
-  },
+  "engines": { "node": ">=18" },
   "scripts": {
     "start": "node index.js",
     "deploy": "node deploy-commands.js",
-    "railway": "node deploy-commands.js && node index.js"
+    "railway": "node index.js"
   },
   "dependencies": {
     "discord.js": "^14.16.3",

@@ -1,109 +1,94 @@
-// Registers BusyPang / Gatekeeper slash commands for a single guild.
-// Env: DISCORD_TOKEN, CLIENT_ID, GUILD_ID (no dotenv)
-const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+// One-time/gated deploy of guild slash commands.
+// Run manually:  npm run deploy
+// Requires: DISCORD_TOKEN, APP_ID, GUILD_ID env vars.
 
-const TOKEN     = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;
-const GUILD_ID  = process.env.GUILD_ID;
+const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 
-if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error('❌ Missing env vars. Set DISCORD_TOKEN, CLIENT_ID, and GUILD_ID.');
+const TOKEN   = process.env.DISCORD_TOKEN;
+const APP_ID  = process.env.APP_ID;   // Application (bot) ID
+const GUILD_ID= process.env.GUILD_ID; // Target guild
+
+if (!TOKEN || !APP_ID || !GUILD_ID) {
+  console.error('❌ Set DISCORD_TOKEN, APP_ID, and GUILD_ID env vars.');
   process.exit(1);
 }
 
-// ---------- Define commands ----------
 const commands = [
+  // /bb
   new SlashCommandBuilder()
     .setName('bb')
     .setDescription('Show BusyPang help & commands'),
 
+  // /warnings [member]
   new SlashCommandBuilder()
     .setName('warnings')
-    .setDescription('Check warnings for yourself or a member')
-    .addUserOption(o =>
-      o.setName('member')
-       .setDescription('The member to check (optional)')
-       .setRequired(false)
-    ),
+    .setDescription('Check your warnings (or another member\'s warnings)')
+    .addUserOption(o => o.setName('member').setDescription('Member to check')),
 
+  // /warn @member [reason]  (Admin)
   new SlashCommandBuilder()
     .setName('warn')
-    .setDescription('Warn a member (Admins only, 3 warnings = auto-ban)')
-    .addUserOption(o =>
-      o.setName('member')
-       .setDescription('Member to warn')
-       .setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName('reason')
-       .setDescription('Reason for the warning')
-       .setRequired(false)
-    ),
+    .setDescription('Warn a member (3 warnings = auto-ban)')
+    .addUserOption(o => o.setName('member').setDescription('Member to warn').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  // /clearwarns @member [reason]  (Admin)
   new SlashCommandBuilder()
     .setName('clearwarns')
-    .setDescription('Reset warnings for a member (Admins only)')
-    .addUserOption(o =>
-      o.setName('member')
-       .setDescription('Member whose warnings to clear')
-       .setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName('reason')
-       .setDescription('Reason for clearing warnings')
-       .setRequired(false)
-    ),
+    .setDescription('Reset a member\'s warnings to 0')
+    .addUserOption(o => o.setName('member').setDescription('Member to reset').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  // /ban @member [reason]  (Admin)
   new SlashCommandBuilder()
     .setName('ban')
-    .setDescription('Ban a member immediately (Admins only)')
-    .addUserOption(o =>
-      o.setName('member')
-       .setDescription('Member to ban')
-       .setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName('reason')
-       .setDescription('Reason for the ban')
-       .setRequired(false)
-    ),
+    .setDescription('Ban a member')
+    .addUserOption(o => o.setName('member').setDescription('Member to ban').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  // /pardon @member [reason]  (Admin)
   new SlashCommandBuilder()
     .setName('pardon')
-    .setDescription('Unban a user and clear warnings (Admins only)')
-    .addUserOption(o =>
-      o.setName('member')
-       .setDescription('User to unban (select by user)')
-       .setRequired(true)
-    )
-    .addStringOption(o =>
-      o.setName('reason')
-       .setDescription('Reason for the pardon')
-       .setRequired(false)
-    ),
+    .setDescription('Unban a user and reset warnings to 0')
+    .addUserOption(o => o.setName('member').setDescription('User to unban').setRequired(true))
+    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  // /banlist  (Admin)
   new SlashCommandBuilder()
     .setName('banlist')
-    .setDescription('Show lifetime ban list (Admins only, paged)'),
+    .setDescription('Show all permanently banned users (paged)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 
+  // /warnlist  (Admin)
   new SlashCommandBuilder()
     .setName('warnlist')
-    .setDescription('Show warning list (Admins only, paged)'),
+    .setDescription('Show members with warnings (paged)')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
 ].map(c => c.toJSON());
 
-// ---------- Push commands ----------
 (async () => {
+  const rest = new REST({ version: '10' }).setToken(TOKEN);
+
   try {
-    console.log('⏫ Registering slash commands to guild:', GUILD_ID);
-    const rest = new REST({ version: '10' }).setToken(TOKEN);
+    console.log('🧹 Clearing GUILD commands …');
     await rest.put(
-      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      Routes.applicationGuildCommands(APP_ID, GUILD_ID),
+      { body: [] }
+    );
+
+    console.log('🚀 Registering guild slash commands …');
+    await rest.put(
+      Routes.applicationGuildCommands(APP_ID, GUILD_ID),
       { body: commands }
     );
-    console.log('✅ Slash commands registered successfully.');
-    process.exit(0);
+
+    console.log('✅ Successfully registered application (/) commands.');
   } catch (err) {
-    console.error('❌ Failed to register commands:', err?.message || err);
+    console.error('❌ Deploy failed:', err?.message || err);
     process.exit(1);
   }
 })();
