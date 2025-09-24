@@ -4,6 +4,9 @@ const {
   GatewayIntentBits,
   PermissionsBitField,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
 } = require('discord.js');
 const express = require('express');
 
@@ -30,17 +33,48 @@ const client = new Client({
 const bannedUsers = new Set();   // lifetime ban IDs
 const warnings    = new Map();   // userId -> count
 
-const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'clearwarns']);
+const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'clearwarns', 'warningslist']);
 const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 
 // mention without ping (clickable @, quiet)
 const NO_PING = { allowedMentions: { parse: [], users: [] } };
 
+// ---------- helpers ----------
 const log = (guild, content) => {
   const ch = guild.channels.cache.get(LOG_CHANNEL);
-  if (ch) ch.send({ content }).catch(() => {});
+  if (ch) ch.send({ content, ...NO_PING }).catch(() => {});
 };
 
+const PAGE_SIZE_BAN = 15;   // ban entries per page
+const PAGE_SIZE_WARN = 10;  // warning entries per page
+
+function makePages(items, perPage, lineBuilder) {
+  const pages = [];
+  for (let i = 0; i < items.length; i += perPage) {
+    const slice = items.slice(i, i + perPage);
+    const lines = slice.map(lineBuilder);
+    pages.push(lines.join('\n') || '(no entries)');
+  }
+  return pages.length ? pages : ['(no entries)'];
+}
+
+function makeEmbed({ title, desc, color = 0xffbf00, footer }) {
+  const emb = new EmbedBuilder().setTitle(title).setDescription(desc).setColor(color);
+  if (footer) emb.setFooter(footer);
+  return emb;
+}
+
+function makeRow(ids, disabled = {}) {
+  // ids: { prev, next, refresh, close }
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(ids.prev).setLabel('◀ Prev').setStyle(ButtonStyle.Secondary).setDisabled(!!disabled.prev),
+    new ButtonBuilder().setCustomId(ids.next).setLabel('Next ▶').setStyle(ButtonStyle.Secondary).setDisabled(!!disabled.next),
+    new ButtonBuilder().setCustomId(ids.refresh).setLabel('🔄 Refresh').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(ids.close).setLabel('✖ Close').setStyle(ButtonStyle.Danger),
+  );
+}
+
+// ---------- ready ----------
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
@@ -88,7 +122,7 @@ client.on('guildMemberRemove', async (member) => {
   }
 });
 
-// --- Slash Command Handler ---
+// ---------- Slash Command Handler ----------
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
 
@@ -96,9 +130,7 @@ client.on('interactionCreate', async (interaction) => {
 
   // Visible to all; restrict execution here
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
-    return interaction.reply({
-      content: '⚠️ You must be an **Admin** to use this command.'
-    });
+    return interaction.reply({ content: '⚠️ You must be an **Admin** to use this command.' });
   }
 
   try {
@@ -117,7 +149,8 @@ client.on('interactionCreate', async (interaction) => {
             '`/clearwarns @user [reason]` — Reset warnings to 0',
             '`/ban @user [reason]` — Ban immediately',
             '`/pardon @user [reason]` — Unban + remove from lifetime list',
-            '`/banlist` — Show lifetime ban list',
+            '`/banlist` — Show lifetime ban list (with pages)',
+            '`/warningslist` — Show all users with warnings (with pages)',
           ].join('\n')
         );
       return interaction.reply({ embeds: [emb] });
@@ -126,9 +159,7 @@ client.on('interactionCreate', async (interaction) => {
     if (cmd === 'warnings') {
       const user  = interaction.options.getUser('member') || interaction.user;
       const count = warnings.get(user.id) || 0;
-      return interaction.reply({
-        content: `🧾 Warnings for <@${user.id}>: **${count}/3**`
-      });
+      return interaction.reply({ content: `🧾 Warnings for <@${user.id}>: **${count}/3**` });
     }
 
     if (cmd === 'warn') {
@@ -138,16 +169,16 @@ client.on('interactionCreate', async (interaction) => {
       const next = Math.min(3, current + 1);
       warnings.set(user.id, next);
 
-      await interaction.reply(`⚠️ <@${user.id}> has been warned — now at **${next}/3**. 📝 ${reason}`);
+      await interaction.reply({ content: `⚠️ <@${user.id}> warned — now **${next}/3**. 📝 ${reason}` });
       log(guild, `⚠️ **${interaction.user.tag}** warned <@${user.id}> — ${next}/3. 📝 ${reason}`);
 
       if (next >= 3) {
         bannedUsers.add(user.id);
         try {
           await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (${reason})` });
-          log(guild, `🚫 Auto-banned **${user.tag}** (${user.id}) at 3 warnings.`);
+          log(guild, `🚫 Auto-banned **${(await client.users.fetch(user.id)).tag}** (${user.id}) at 3 warnings.`);
         } catch {
-          log(guild, `⚠️ Could not auto-ban **${user.tag}** — check role/permissions.`);
+          log(guild, `⚠️ Could not auto-ban **${user.id}** — check role/permissions.`);
         }
       }
       return;
@@ -157,7 +188,7 @@ client.on('interactionCreate', async (interaction) => {
       const user   = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warnings cleared by ${interaction.user.tag}`;
       warnings.set(user.id, 0);
-      await interaction.reply(`🧹 Cleared warnings for <@${user.id}>. 📝 ${reason}`);
+      await interaction.reply({ content: `🧹 Cleared warnings for <@${user.id}>. 📝 ${reason}` });
       log(guild, `🧹 **${interaction.user.tag}** cleared warnings for <@${user.id}>. 📝 ${reason}`);
       return;
     }
@@ -168,8 +199,7 @@ client.on('interactionCreate', async (interaction) => {
       bannedUsers.add(user.id);
       try {
         await guild.members.ban(user.id, { reason });
-        // No ping here — tag + ID only
-        await interaction.reply(`🚫 Banned **${user.tag}** (${user.id}). 📝 ${reason}`);
+        await interaction.reply({ content: `🚫 Banned **${user.tag}** (${user.id}). 📝 ${reason}` });
         log(guild, `🚫 **${interaction.user.tag}** banned **${user.tag}** (${user.id}). 📝 ${reason}`);
       } catch {
         await interaction.reply({ content: '⚠️ Could not ban that user (role/permissions?).' });
@@ -184,7 +214,7 @@ client.on('interactionCreate', async (interaction) => {
       warnings.set(user.id, 0);
       try {
         await guild.bans.remove(user.id, reason);
-        await interaction.reply(`✅ <@${user.id}> has been pardoned. 📝 ${reason}`);
+        await interaction.reply({ content: `✅ <@${user.id}> has been pardoned. 📝 ${reason}` });
         log(guild, `✅ **${interaction.user.tag}** pardoned <@${user.id}>. 📝 ${reason}`);
       } catch {
         await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).' });
@@ -192,45 +222,152 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
+    // ------- /banlist (paginated embeds) -------
     if (cmd === 'banlist') {
-      // 🔥 LIVE fetch every time so it never goes stale
-      const bans = await guild.bans.fetch().catch(() => null);
-      if (!bans) return interaction.reply('⚠️ Could not fetch ban list (permissions/API).');
-
-      // refresh cache from live data
+      const bans = await guild.bans.fetch();
       bannedUsers.clear();
       for (const [id] of bans) bannedUsers.add(id);
 
-      if (bans.size === 0) {
+      if (!bans || bans.size === 0) {
         return interaction.reply({ content: '📋 No users in the lifetime ban list.' });
       }
 
-      // Build lines with @mention (clickable) + tag + ID, but DO NOT ping
-      const lines = [];
+      const banData = [];
       for (const [, entry] of bans) {
-        const u = entry.user;
-        lines.push(`• <@${u.id}> — **${u.tag}** (${u.id})`);
+        banData.push({ id: entry.user.id, tag: entry.user?.tag || '(unknown)' });
       }
 
-      // Split if too long
-      const header = '📋 **Lifetime Ban List**\n';
-      let buf = header;
-      const chunks = [];
-      for (const line of lines) {
-        if ((buf + line + '\n').length > 1900) {
-          chunks.push(buf);
-          buf = '';
-        }
-        buf += line + '\n';
-      }
-      if (buf.length) chunks.push(buf);
+      let pages = makePages(banData, PAGE_SIZE_BAN, (u) => `• <@${u.id}> — **${u.tag}** (${u.id})`);
+      let page = 0;
+      const ids = { prev: 'ban_prev', next: 'ban_next', refresh: 'ban_refresh', close: 'ban_close' };
 
-      for (const chunk of chunks) {
-        // allowedMentions prevents pings but keeps the mention formatting
-        await interaction.reply({ content: chunk, ...NO_PING });
-      }
+      const msg = await interaction.reply({
+        embeds: [makeEmbed({ title: '📋 Lifetime Ban List', desc: pages[page], footer: { text: `Page ${page+1}/${pages.length} • ${banData.length} total` } })],
+        components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
+        ...NO_PING,
+      });
+
+      const collector = msg.createMessageComponentCollector({
+        time: 120_000,
+        filter: (btn) => btn.user.id === interaction.user.id
+      });
+
+      collector.on('collect', async (btn) => {
+        try {
+          if (btn.customId === ids.prev) page = Math.max(0, page - 1);
+          else if (btn.customId === ids.next) page = Math.min(pages.length - 1, page + 1);
+          else if (btn.customId === ids.refresh) {
+            const fresh = await guild.bans.fetch();
+            bannedUsers.clear();
+            const freshData = [];
+            for (const [, e] of fresh) freshData.push({ id: e.user.id, tag: e.user?.tag || '(unknown)' });
+            pages = makePages(freshData, PAGE_SIZE_BAN, (u) => `• <@${u.id}> — **${u.tag}** (${u.id})`);
+            page = Math.min(page, pages.length - 1);
+          } else if (btn.customId === ids.close) {
+            collector.stop('closed');
+            return btn.update({ components: [] });
+          }
+
+          await btn.update({
+            embeds: [makeEmbed({ title: '📋 Lifetime Ban List', desc: pages[page], footer: { text: `Page ${page+1}/${pages.length} • ${bannedUsers.size} total` } })],
+            components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
+            ...NO_PING,
+          });
+        } catch {}
+      });
+
+      collector.on('end', async () => {
+        try { await msg.edit({ components: [] }); } catch {}
+      });
+
       return;
     }
+
+    // ------- NEW: /warningslist (paginated embeds) -------
+    if (cmd === 'warningslist') {
+      // Build an array of users who currently have warnings > 0
+      const entries = [...warnings.entries()]
+        .filter(([, count]) => (count || 0) > 0)
+        .map(([id, count]) => ({ id, count }));
+
+      if (entries.length === 0) {
+        return interaction.reply({ content: '🧾 No members currently have warnings.' });
+      }
+
+      // Try to resolve tags; fallback to unknown
+      const data = [];
+      for (const e of entries) {
+        try {
+          const u = await client.users.fetch(e.id);
+          data.push({ id: e.id, tag: u?.tag || '(unknown)', count: e.count });
+        } catch {
+          data.push({ id: e.id, tag: '(unknown)', count: e.count });
+        }
+      }
+
+      // Sort by highest warnings first
+      data.sort((a, b) => b.count - a.count);
+
+      let pages = makePages(
+        data,
+        PAGE_SIZE_WARN,
+        (u) => `• <@${u.id}> — **${u.count}/3** (${u.tag}, ${u.id})`
+      );
+      let page = 0;
+      const ids = { prev: 'warn_prev', next: 'warn_next', refresh: 'warn_refresh', close: 'warn_close' };
+
+      const msg = await interaction.reply({
+        embeds: [makeEmbed({ title: '⚠️ Current Warnings', desc: pages[page], color: 0xff4444, footer: { text: `Page ${page+1}/${pages.length} • ${data.length} members` } })],
+        components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
+        ...NO_PING,
+      });
+
+      const collector = msg.createMessageComponentCollector({
+        time: 120_000,
+        filter: (btn) => btn.user.id === interaction.user.id
+      });
+
+      collector.on('collect', async (btn) => {
+        try {
+          if (btn.customId === ids.prev) page = Math.max(0, page - 1);
+          else if (btn.customId === ids.next) page = Math.min(pages.length - 1, page + 1);
+          else if (btn.customId === ids.refresh) {
+            // refresh from in-memory warnings (they’re live in this process)
+            const refreshed = [...warnings.entries()]
+              .filter(([, count]) => (count || 0) > 0)
+              .map(([id, count]) => ({ id, count }));
+            const refData = [];
+            for (const e of refreshed) {
+              try {
+                const u = await client.users.fetch(e.id);
+                refData.push({ id: e.id, tag: u?.tag || '(unknown)', count: e.count });
+              } catch {
+                refData.push({ id: e.id, tag: '(unknown)', count: e.count });
+              }
+            }
+            refData.sort((a, b) => b.count - a.count);
+            pages = makePages(refData, PAGE_SIZE_WARN, (u) => `• <@${u.id}> — **${u.count}/3** (${u.tag}, ${u.id})`);
+            page = Math.min(page, pages.length - 1);
+          } else if (btn.customId === ids.close) {
+            collector.stop('closed');
+            return btn.update({ components: [] });
+          }
+
+          await btn.update({
+            embeds: [makeEmbed({ title: '⚠️ Current Warnings', desc: pages[page], color: 0xff4444, footer: { text: `Page ${page+1}/${pages.length} • ${entries.length} members` } })],
+            components: [makeRow(ids, { prev: page === 0, next: page === pages.length - 1 })],
+            ...NO_PING,
+          });
+        } catch {}
+      });
+
+      collector.on('end', async () => {
+        try { await msg.edit({ components: [] }); } catch {}
+      });
+
+      return;
+    }
+
   } catch (err) {
     console.error(err);
     if (!interaction.replied) {

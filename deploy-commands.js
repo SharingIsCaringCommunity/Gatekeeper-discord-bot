@@ -1,85 +1,107 @@
-// Deploy guild slash commands so EVERYONE can see them.
-// Admin gating is enforced at runtime in index.js.
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
+require('dotenv').config();
 
-const TOKEN     = process.env.DISCORD_TOKEN;
-const CLIENT_ID = process.env.CLIENT_ID;   // Bot/Application ID
-const GUILD_ID  = process.env.GUILD_ID;    // Your server ID
+const TOKEN    = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID; // your bot's application ID
+const GUILD_ID  = process.env.GUILD_ID;  // target server for per-guild registration
 
-if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
-  console.error('❌ Missing env vars: DISCORD_TOKEN, CLIENT_ID, GUILD_ID');
-  process.exit(1);
-}
+// --- Define Commands ---
+const commands = [
+  new SlashCommandBuilder()
+    .setName('bb')
+    .setDescription('Show BusyPang help & commands')
+    .setDMPermission(false),
 
-const cmds = [
-  // Admin-only to USE (visible to all)
+  new SlashCommandBuilder()
+    .setName('warnings')
+    .setDescription('Check warnings for yourself or another user')
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('Member to check (optional)')
+    )
+    .setDMPermission(false),
+
   new SlashCommandBuilder()
     .setName('warn')
-    .setDescription('Warn a member (Admins only; 3 warnings = auto-ban)')
-    .addUserOption(o => o.setName('member').setDescription('Member to warn').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .setDescription('Warn a member (Admins only, 3 warnings = auto-ban)')
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('Member to warn')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('reason')
+        .setDescription('Reason for the warning')
+    )
     .setDMPermission(false),
 
   new SlashCommandBuilder()
     .setName('clearwarns')
-    .setDescription('Reset a member’s warnings to 0 (Admins only)')
-    .addUserOption(o => o.setName('member').setDescription('Member to clear').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .setDescription('Clear warnings for a member (Admins only)')
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('Member to clear warnings for')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('reason')
+        .setDescription('Reason for clearing warnings')
+    )
     .setDMPermission(false),
 
   new SlashCommandBuilder()
     .setName('ban')
     .setDescription('Ban a member (Admins only)')
-    .addUserOption(o => o.setName('member').setDescription('Member to ban').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('Member to ban')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('reason')
+        .setDescription('Reason for banning')
+    )
     .setDMPermission(false),
 
   new SlashCommandBuilder()
     .setName('pardon')
-    .setDescription('Unban a user and reset warnings (Admins only)')
-    .addUserOption(o => o.setName('member').setDescription('User to unban').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason'))
+    .setDescription('Unban a member (Admins only)')
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('Member to unban')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('reason')
+        .setDescription('Reason for pardoning')
+    )
     .setDMPermission(false),
 
   new SlashCommandBuilder()
     .setName('banlist')
-    .setDescription('Show all permanently banned users (Admins only)')
-    .setDMPermission(false),
-
-  // Everyone can use
-  new SlashCommandBuilder()
-    .setName('warnings')
-    .setDescription('Check your warnings or another member’s warnings')
-    .addUserOption(o => o.setName('member').setDescription('Member to check'))
+    .setDescription('Show the lifetime ban list (Admins only, paginated)')
     .setDMPermission(false),
 
   new SlashCommandBuilder()
-    .setName('bb')
-    .setDescription('Show BusyPang bot help & commands')
+    .setName('warningslist')
+    .setDescription('Show all members with warnings (Admins only, paginated)')
     .setDMPermission(false),
-].map(c => c.toJSON());
+].map(cmd => cmd.toJSON());
 
-async function run() {
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
+// --- Deploy ---
+const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-  // Optional: clear GLOBAL to avoid duplicates if you ever had them
+(async () => {
   try {
-    await rest.put(Routes.applicationCommands(CLIENT_ID), { body: [] });
-    console.log('✅ Cleared GLOBAL commands.');
-  } catch (e) {
-    console.log('ℹ️ Skip GLOBAL clear:', e?.status || '', e?.message || '');
+    console.log('⏳ Refreshing slash commands...');
+
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      { body: commands },
+    );
+
+    console.log('✅ Successfully reloaded slash commands.');
+  } catch (err) {
+    console.error('❌ Error reloading commands:', err);
   }
-
-  console.log(`🗺️ Clearing GUILD commands for ${GUILD_ID}...`);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: [] });
-  console.log('✅ Guild commands cleared.');
-
-  console.log(`🚀 Deploying ${cmds.length} commands to guild ${GUILD_ID}...`);
-  await rest.put(Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID), { body: cmds });
-  console.log('✅ Guild commands deployed (instant).');
-}
-
-run().catch(err => {
-  console.error('❌ Deploy failed:', err?.status || '', err?.message || err);
-  process.exit(1);
-});
+})();
