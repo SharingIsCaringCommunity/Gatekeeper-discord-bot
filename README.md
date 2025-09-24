@@ -1,50 +1,62 @@
 # 📜 Gatekeeper Bot — Changelog
 
 <p align="left">
-  <img src="https://img.shields.io/badge/version-v1.5.6-blue?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/version-v1.5.7-blue?style=for-the-badge" />
   <img src="https://img.shields.io/badge/status-stable-brightgreen?style=for-the-badge" />
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=for-the-badge" />
 </p>
 
 ---
 
-## v1.5.6 (2025-09-24)  
-**Mention Logic Update**
+## v1.5.7 (2025-09-24)  
+**Warnings List (Paginated Embeds)**  
 
 ### ✅ What’s new
-- `/warn`, `/warnings`, and `/pardon` now **ping the user** with `<@userId>` so members receive a notification.  
-- `/ban` and `/banlist` use **username + ID only** (no ping), avoiding unnecessary notifications for banned users.  
+- Added `/warningslist` (Admin-only):  
+  - Shows all members with warnings.  
+  - Paginated embeds with Prev / Next / Refresh / Close buttons.  
+  - Sorted by highest warnings first.  
+  - Mentions are clickable (`<@id>`) but don’t ping.  
 
 ### 🔄 Improvements
-- Logs are now clearer and more consistent with mentions vs tags.  
-- Admin actions are still fully visible to everyone in the log channel.  
+- Unified pagination UX with `/banlist`.  
+- Both banlist & warningslist auto-timeout after 2 minutes.  
+- Refresh buttons pull latest data (live sync).  
 
 ---
 
-## v1.5.5 (2025-09-24)  
-**Public Replies (No More Ephemeral Responses)**  
+## v1.5.6 (2025-09-23)  
+**Banlist Pagination & Buttons**  
 
-- Removed all `ephemeral: true` flags.  
-- All command replies (success, errors, help, logs) are now **posted in the channel for everyone to see**.  
-- Permission errors, user feedback, and command outputs are no longer private.  
+- Upgraded `/banlist` into paginated embeds.  
+- Added Prev / Next / Refresh / Close controls.  
+- Mentions clickable without ping.  
+- Auto-timeout after 2 minutes.  
 
 ---
 
-## v1.5.4 (2025-09-24)  
-**Command Visibility Update**  
+## v1.5.5 (2025-09-23)  
+**Better Mentions & Sync**  
 
-- All slash commands are now visible to everyone in the guild.  
-- Admin-only commands (`/ban`, `/warn`, `/pardon`, `/clearwarns`) enforce permissions **at runtime** instead of being hidden.  
-- Regular members can still run `/warnings`, `/banlist`, and `/bb`.  
+- `/banlist` now uses `<@id>` for clickable profiles.  
+- Fallback `(unknown)` if user cache missing.  
+- No more `@unknown-user` spam.  
+
+---
+
+## v1.5.4 (2025-09-23)  
+**Permissions & Replies**  
+
+- Everyone can see commands, but only Admins can run moderation ones.  
+- Error messages (`no permission`, `user not found`, `could not ban`) are now public replies.  
 
 ---
 
 ## v1.5.3 (2025-09-23)  
 **Slash Command Fixes**  
 
-- Fixed duplicate registration of slash commands.  
-- Updated deployment logic to properly sync with Discord API.  
-- Commands now consistently appear in Discord UI after deployment.  
+- Fixed duplicate slash command registration.  
+- Enforced per-guild registration to ensure commands appear instantly.  
 
 ---
 
@@ -52,35 +64,35 @@
 **Stability & Quality Polishing**  
 
 - Improved ban sync reliability on startup and re-invite.  
-- `/banlist`, `/warnings`, `/pardon` now provide clearer feedback if user not found or not banned.  
-- Logs improved to use `<@user>` mentions instead of plain tags.  
-- Fixed slash commands not appearing reliably after deploy by enforcing per-guild registration.  
-- Clearer error messages when bot lacks permissions.  
+- `/banlist`, `/warnings`, `/pardon` → clearer feedback.  
+- Logs now use `<@user>` mentions.  
+- Fixed role hierarchy errors with clearer feedback.  
 
 ---
 
 ## v1.5.1 (2025-09-23)  
 **Ban Sync & Guild Support**  
 
-- Added ban sync on startup — lifetime ban list always matches the server’s bans.  
-- Listens to `guildBanAdd` and `guildBanRemove` to keep ban cache updated.  
-- Added `guildCreate` handler → registers slash commands & syncs bans when bot joins a new server.  
+- Synced ban list with server on startup.  
+- Listens to `guildBanAdd` / `guildBanRemove`.  
+- Registers slash commands when bot joins new servers.  
 
 ---
 
 ## v1.5.0 (2025-09-23)  
 **Slash Command Migration + Ban Sync**  
 
-- Migrated all commands from `!prefix` to Discord slash commands:  
-  - `/bb` → Help & command list  
-  - `/warn @user [reason]` → Warn member (3 warnings = auto-ban)  
-  - `/warnings [@user]` → Check warnings  
-  - `/clearwarns @user [reason]` → Reset warnings  
-  - `/ban @user [reason]` → Manual ban  
-  - `/pardon @user [reason]` → Pardon/unban  
-  - `/banlist` → Show all lifetime-banned members  
-- Slash commands are now registered per-guild (`GUILD_ID` required).  
-- Commands autocomplete in chat, no need to remember `!` prefix.  
-- Bot automatically syncs with existing bans at startup and listens to ban events for real-time updates.  
+- Migrated all `!prefix` commands → slash commands.  
+- Commands: `/bb`, `/warn`, `/warnings`, `/clearwarns`, `/ban`, `/pardon`, `/banlist`.  
+- Slash commands registered per-guild.  
+- Autocomplete in chat.  
+- Ban sync & error feedback improvements.  
 
 ---
+
+## Older Versions
+- **v1.4.0–1.4.3** → Warning system, clearwarns, admin checks.  
+- **v1.3.x** → ENV vars, help → bb, startup sync.  
+- **v1.2** → Manual commands added (`!ban`, `!pardon`, etc).  
+- **v1.1** → Improved auto-ban, join/leave logs.  
+- **v1.0** → Initial release (auto-ban leavers, rejoiners).  
