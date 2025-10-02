@@ -63,6 +63,68 @@ const getGuildWarnings = (gid) => {
   return m;
 };
 
+// ===== Region Leaderboard =====
+// replace ROLE_ID_X with actual Discord role IDs
+const REGION_ROLES = {
+  "ROLE_ID_1": ":house_with_garden: NEGERI SEMBILAN",
+  "ROLE_ID_2": ":hot_pepper: KELANTAN",
+  "ROLE_ID_3": ":park: PERAK",
+  "ROLE_ID_4": ":elephant: PAHANG",
+  "ROLE_ID_5": ":cityscape: SELANGOR",
+  "ROLE_ID_6": ":ear_of_rice: KEDAH",
+  "ROLE_ID_7": ":turtle: TERENGGANU",
+  "ROLE_ID_8": ":lion_face: JOHOR",
+  "ROLE_ID_9": ":grapes: PERLIS",
+  "ROLE_ID_10": ":palm_tree: PENANG",
+  "ROLE_ID_11": ":anchor: MALACCA",
+  "ROLE_ID_12": ":orangutan: SARAWAK",
+  "ROLE_ID_13": ":mountain_snow: SABAH",
+  "ROLE_ID_14": ":mosque: FEDERAL TERRITORY (KL/PUTRAJAYA/LABUAN)",
+  "ROLE_ID_15": ":globe_with_meridians: OTHERS"
+};
+
+async function updateRegionStats(guild, channelId) {
+  try {
+    const channel = guild.channels.cache.get(channelId);
+    if (!channel) return;
+
+    // collect region role counts
+    let regionData = Object.entries(REGION_ROLES).map(([id, label]) => {
+      const role = guild.roles.cache.get(id);
+      return { label, count: role ? role.members.size : 0 };
+    });
+
+    // sort by count
+    regionData.sort((a, b) => b.count - a.count);
+
+    // medals for top 3
+    const medals = ["🏆", "🥈", "🥉"];
+    let roleList = regionData.map((r, i) => {
+      const medal = medals[i] || `#${i + 1}`;
+      return `**${medal} ${r.label}** — ${r.count} member(s)`;
+    }).join("\n");
+
+    const embed = new EmbedBuilder()
+      .setTitle("🌐 Malaysia Region Leaderboard")
+      .setDescription(roleList || "No region roles found.")
+      .setColor("Green")
+      .setFooter({ text: `Last updated: ${new Date().toLocaleString()}` })
+      .setTimestamp();
+
+    // edit existing bot msg if exists
+    const messages = await channel.messages.fetch({ limit: 10 });
+    const botMsg = messages.find(m => m.author.id === guild.client.user.id);
+
+    if (botMsg) {
+      await botMsg.edit({ embeds: [embed] });
+    } else {
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (err) {
+    console.error("❌ Failed to update region stats:", err);
+  }
+}
+
 // ===== Pagination utilities =====
 function slicePage(items, page, perPage) {
   const start = page * perPage;
@@ -152,9 +214,9 @@ client.once('ready', async () => {
 
   // --- Activity randomizer (3 rotating activities) ---
   const activities = [
-    { type: 0, name: 'I am BusyBot | /bb' },           // Playing
-    { type: 3, name: "you'all 👀" },                   // Watching
-    { type: 2, name: ' /commands 🎶' },                // Listening
+    { type: 0, name: 'I am BusyBot | /bb' },
+    { type: 3, name: "you'all 👀" },
+    { type: 2, name: ' /commands 🎶' },
   ];
 
   function setRandomPresence() {
@@ -169,9 +231,15 @@ client.once('ready', async () => {
     }
   }
 
-  // Set now, then rotate every 10 minutes
   setRandomPresence();
   setInterval(setRandomPresence, 10 * 60 * 1000);
+
+  // --- Region leaderboard auto-updater ---
+  const guild = client.guilds.cache.first();
+  const channelId = "STATS_CHANNEL_ID"; // replace with the ID of the stats channel
+
+  await updateRegionStats(guild, channelId); // run once at startup
+  setInterval(() => updateRegionStats(guild, channelId), 5 * 60 * 1000); // refresh every 5min
 });
 
 // Keep cache in sync with ban/unban
