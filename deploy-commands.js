@@ -1,5 +1,4 @@
-// deploy-commands.js
-// Registers slash commands for BusyPang Bot
+// deploy-commands.js — Registers slash commands for BusyPang
 
 const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
