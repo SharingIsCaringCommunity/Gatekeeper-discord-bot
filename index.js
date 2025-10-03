@@ -109,12 +109,11 @@ function buildRegionEmbed() {
 
   const { full, friendlyTime } = malaysiaTimeStrings();
 
-  return new EmbedBuilder()
-    .setTitle("🌐 Malaysia Region Leaderboard")
-    .setDescription(lines.join("\n") || "No region roles found.")
-    .setColor("Green")
-    .setFooter({ text: `Last updated: ${full} | Today at ${friendlyTime}` })
-    .setTimestamp();
+return new EmbedBuilder()
+  .setTitle("🌐 Malaysia Region Leaderboard")
+  .setDescription(lines.join("\n") || "No region roles found.")
+  .setColor("Green")
+  .setFooter({ text: `Last updated (Malaysia Time): ${full} | ${friendlyTime}` });
 }
 
 // ===== Update stats in STATS_CHANNEL =====
