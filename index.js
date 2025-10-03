@@ -92,7 +92,6 @@ function malaysiaTimeStrings() {
   return { full, friendlyTime };
 }
 
-// ===== Build Leaderboard Embed =====
 function buildRegionEmbed() {
   const regionData = REGION_LIST.map(entry => {
     const count = regionCounts.get(entry.id) || 0;
@@ -107,13 +106,23 @@ function buildRegionEmbed() {
     return `**${medal} ${r.label}** — ${r.count} member(s)`;
   });
 
-  const { full, friendlyTime } = malaysiaTimeStrings();
+  // Malaysia time (MYT) in 12-hour format
+  const nowMY = new Date().toLocaleString("en-US", {
+    timeZone: "Asia/Kuala_Lumpur",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: true
+  });
 
-return new EmbedBuilder()
-  .setTitle("🌐 Malaysia Region Leaderboard")
-  .setDescription(lines.join("\n") || "No region roles found.")
-  .setColor("Green")
-  .setFooter({ text: `Last updated (Malaysia Time): ${full} | ${friendlyTime}` });
+  return new EmbedBuilder()
+    .setTitle("🌐 Malaysia Region Leaderboard")
+    .setDescription(lines.join("\n") || "No region roles found.")
+    .setColor("Green")
+    .setFooter({ text: `Last updated (MYT): ${nowMY}` });
 }
 
 // ===== Update stats in STATS_CHANNEL =====
