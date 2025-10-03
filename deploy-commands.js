@@ -1,98 +1,105 @@
-// Register guild slash commands (no dotenv needed for Railway)
-const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
+// deploy-commands.js
+// Registers slash commands for BusyPang Bot
 
-const TOKEN   = process.env.DISCORD_TOKEN;
-const CLIENT  = process.env.CLIENT_ID;   // Application (bot) ID
-const GUILD   = process.env.GUILD_ID;    // Target guild ID for commands
+const { REST, Routes, SlashCommandBuilder } = require('discord.js');
 
-if (!TOKEN || !CLIENT || !GUILD) {
-  console.error('Missing env: DISCORD_TOKEN, CLIENT_ID, GUILD_ID are required.');
+const TOKEN     = process.env.DISCORD_TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const GUILD_ID  = process.env.GUILD_ID;
+
+if (!TOKEN || !CLIENT_ID || !GUILD_ID) {
+  console.error("❌ Missing env vars. Set DISCORD_TOKEN, CLIENT_ID, GUILD_ID.");
   process.exit(1);
 }
 
-const adminDefaultPerm = PermissionFlagsBits.Administrator;
-
 const commands = [
-  // Help
+  // Everyone
   new SlashCommandBuilder()
     .setName('bb')
-    .setDescription('BusyPang help & commands')
-    .toJSON(),
+    .setDescription('Show BusyPang help & commands'),
 
-  // Everyone: check warnings (optional mention)
+  new SlashCommandBuilder()
+    .setName('regions')
+    .setDescription('Show Malaysia Region Leaderboard'),
+
   new SlashCommandBuilder()
     .setName('warnings')
-    .setDescription('Check warnings (yours or another member)')
-    .addUserOption(o => o.setName('member').setDescription('Member to check').setRequired(false))
-    .toJSON(),
+    .setDescription('Check warnings for a member')
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('The member to check')
+        .setRequired(false)
+    ),
 
-  // Admin: warn
+  // Admin only
   new SlashCommandBuilder()
     .setName('warn')
-    .setDescription('Warn a member (3 warnings = lifetime ban)')
-    .addUserOption(o => o.setName('member').setDescription('Member to warn').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
-    .setDefaultMemberPermissions(adminDefaultPerm)
-    .toJSON(),
+    .setDescription('Warn a member (3 warnings = auto-ban)')
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('The member to warn')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('reason')
+        .setDescription('Reason for warning')
+        .setRequired(false)
+    ),
 
-  // Admin: clear warnings
   new SlashCommandBuilder()
     .setName('clearwarns')
-    .setDescription('Reset a member’s warnings to 0')
-    .addUserOption(o => o.setName('member').setDescription('Member to reset').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
-    .setDefaultMemberPermissions(adminDefaultPerm)
-    .toJSON(),
+    .setDescription('Clear all warnings for a member')
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('The member to clear warnings')
+        .setRequired(true)
+    ),
 
-  // Admin: ban
   new SlashCommandBuilder()
     .setName('ban')
-    .setDescription('Ban a member immediately (lifetime)')
-    .addUserOption(o => o.setName('member').setDescription('Member to ban').setRequired(true))
-    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
-    .setDefaultMemberPermissions(adminDefaultPerm)
-    .toJSON(),
+    .setDescription('Ban a member immediately')
+    .addUserOption(opt =>
+      opt.setName('member')
+        .setDescription('The member to ban')
+        .setRequired(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('reason')
+        .setDescription('Reason for ban')
+        .setRequired(false)
+    ),
 
-  // Admin: pardon by USER ID (works even if not in server)
   new SlashCommandBuilder()
     .setName('pardon')
-    .setDescription('Unban a user by ID + resets warnings to 0 & allows rejoining')
-    .addStringOption(o =>
-      o.setName('user_id')
-       .setDescription('User ID to unban (paste the numeric ID)')
-       .setRequired(true)
-    )
-    .addStringOption(o => o.setName('reason').setDescription('Reason').setRequired(false))
-    .setDefaultMemberPermissions(adminDefaultPerm)
-    .toJSON(),
+    .setDescription('Unban a member by ID')
+    .addStringOption(opt =>
+      opt.setName('user_id')
+        .setDescription('The user ID to unban')
+        .setRequired(true)
+    ),
 
-  // Admin: lifetime ban list (paged)
   new SlashCommandBuilder()
     .setName('banlist')
-    .setDescription('Show lifetime ban list (paged)')
-    .setDefaultMemberPermissions(adminDefaultPerm)
-    .toJSON(),
+    .setDescription('Show ban list'),
 
-  // Admin: warning list (paged)
   new SlashCommandBuilder()
     .setName('warnlist')
-    .setDescription('Show warning list (paged)')
-    .setDefaultMemberPermissions(adminDefaultPerm)
-    .toJSON(),
-];
+    .setDescription('Show warning list'),
+].map(cmd => cmd.toJSON());
+
+const rest = new REST({ version: '10' }).setToken(TOKEN);
 
 (async () => {
-  const rest = new REST({ version: '10' }).setToken(TOKEN);
   try {
-    console.log('🧹 Clearing GUILD commands…');
-    await rest.put(Routes.applicationGuildCommands(CLIENT, GUILD), { body: [] });
+    console.log('⏳ Refreshing application (/) commands...');
 
-    console.log('🚀 Registering guild slash commands…');
-    await rest.put(Routes.applicationGuildCommands(CLIENT, GUILD), { body: commands });
+    await rest.put(
+      Routes.applicationGuildCommands(CLIENT_ID, GUILD_ID),
+      { body: commands },
+    );
 
-    console.log('✅ Successfully registered application (/) commands.');
+    console.log('✅ Successfully reloaded application (/) commands.');
   } catch (err) {
-    console.error('❌ Deploy failed:', err?.message || err);
-    process.exit(1);
+    console.error('❌ Failed to deploy commands:', err);
   }
 })();
