@@ -1,5 +1,5 @@
-// BusyPang / Gatekeeper — Moderation + Region Leaderboard
-// Warns, bans, banlist, warnlist, pardon + Malaysia Region Leaderboard
+// BusyPang — Moderation + Malaysia Region Leaderboard
+// Auto role counts with incremental updates + Malaysia time in footer
 
 const {
   Client,
@@ -10,13 +10,13 @@ const {
 const express = require('express');
 
 // ===== Environment =====
-const TOKEN        = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL  = process.env.LOG_CHANNEL;
-const RULES_LINK   = process.env.RULES_LINK || "";
+const TOKEN         = process.env.DISCORD_TOKEN;
+const LOG_CHANNEL   = process.env.LOG_CHANNEL;
 const STATS_CHANNEL = process.env.STATS_CHANNEL;
+const RULES_LINK    = process.env.RULES_LINK || "";
 
-if (!TOKEN || !LOG_CHANNEL || !STATS_CHANNEL) {
-  console.error('❌ Missing env vars. Set DISCORD_TOKEN, LOG_CHANNEL, STATS_CHANNEL.');
+if (!TOKEN || !LOG_CHANNEL) {
+  console.error("❌ Missing env vars. Set DISCORD_TOKEN and LOG_CHANNEL.");
   process.exit(1);
 }
 
@@ -26,7 +26,7 @@ const PORT = process.env.PORT || 3000;
 app.get('/', (_req, res) => res.send('🟢 BusyPang is running.'));
 app.listen(PORT, () => console.log(`✅ Web server running on port ${PORT}`));
 
-// ===== Discord Client =====
+// ===== Client =====
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
@@ -43,132 +43,173 @@ const warningsByGuild = new Map();
 const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'warnlist', 'clearwarns']);
 const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 
+// ===== Region config =====
+const REGION_LIST = [
+  { id: process.env.ROLE_ID_1, label: '🏠 NEGERI SEMBILAN' },
+  { id: process.env.ROLE_ID_2, label: '🌶️ KELANTAN' },
+  { id: process.env.ROLE_ID_3, label: '🌳 PERAK' },
+  { id: process.env.ROLE_ID_4, label: '🐘 PAHANG' },
+  { id: process.env.ROLE_ID_5, label: '🏙️ SELANGOR' },
+  { id: process.env.ROLE_ID_6, label: '🌾 KEDAH' },
+  { id: process.env.ROLE_ID_7, label: '🐢 TERENGGANU' },
+  { id: process.env.ROLE_ID_8, label: '🦁 JOHOR' },
+  { id: process.env.ROLE_ID_9, label: '🍇 PERLIS' },
+  { id: process.env.ROLE_ID_10, label: '🌴 PENANG' },
+  { id: process.env.ROLE_ID_11, label: '⚓ MALACCA' },
+  { id: process.env.ROLE_ID_12, label: '🦧 SARAWAK' },
+  { id: process.env.ROLE_ID_13, label: '⛰️ SABAH' },
+  { id: process.env.ROLE_ID_14, label: '🕌 FEDERAL TERRITORY (KL/PUTRAJAYA/LABUAN)' },
+  { id: process.env.ROLE_ID_15, label: '🌐 OTHERS' },
+].filter(r => r.id);
+
+// ===== Region counts cache =====
+const regionCounts = new Map(); // roleId -> count
+
+// ===== Helpers =====
 const log = (guild, content) => {
-  const ch = guild.channels.cache.get(LOG_CHANNEL);
-  if (ch) ch.send({ content }).catch(() => {});
+  try {
+    const ch = guild.channels.cache.get(LOG_CHANNEL);
+    if (ch) ch.send({ content }).catch(() => {});
+  } catch {}
 };
+
 const getGuildWarnings = (gid) => {
   let m = warningsByGuild.get(gid);
   if (!m) { m = new Map(); warningsByGuild.set(gid, m); }
   return m;
 };
 
-// ===== Region Leaderboard (env IDs) =====
-const REGION_ROLES = {
-  [process.env.ROLE_ID_1]:  ":house_with_garden: NEGERI SEMBILAN",
-  [process.env.ROLE_ID_2]:  ":hot_pepper: KELANTAN",
-  [process.env.ROLE_ID_3]:  ":park: PERAK",
-  [process.env.ROLE_ID_4]:  ":elephant: PAHANG",
-  [process.env.ROLE_ID_5]:  ":cityscape: SELANGOR",
-  [process.env.ROLE_ID_6]:  ":ear_of_rice: KEDAH",
-  [process.env.ROLE_ID_7]:  ":turtle: TERENGGANU",
-  [process.env.ROLE_ID_8]:  ":lion_face: JOHOR",
-  [process.env.ROLE_ID_9]:  ":grapes: PERLIS",
-  [process.env.ROLE_ID_10]: ":palm_tree: PENANG",
-  [process.env.ROLE_ID_11]: ":anchor: MALACCA",
-  [process.env.ROLE_ID_12]: ":orangutan: SARAWAK",
-  [process.env.ROLE_ID_13]: ":mountain_snow: SABAH",
-  [process.env.ROLE_ID_14]: ":mosque: FEDERAL TERRITORY (KL/PUTRAJAYA/LABUAN)",
-  [process.env.ROLE_ID_15]: ":globe_with_meridians: OTHERS"
-};
+function malaysiaTimeStrings() {
+  const now = new Date();
+  const malaysiaNow = new Date(now.toLocaleString('en-US', { timeZone: 'Asia/Kuala_Lumpur' }));
+  const full = malaysiaNow.toLocaleString('en-GB', {
+    timeZone: 'Asia/Kuala_Lumpur',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
+    hour12: false
+  });
+  const friendlyTime = malaysiaNow.toLocaleTimeString('en-US', { timeZone: 'Asia/Kuala_Lumpur', hour: '2-digit', minute: '2-digit', hour12: true });
+  return { full, friendlyTime };
+}
 
-function buildRegionEmbed(guild) {
-  let regionData = Object.entries(REGION_ROLES).map(([id, label]) => {
-    const role = guild.roles.cache.get(id);
-    return { label, count: role ? role.members.size : 0 };
+// ===== Build Leaderboard Embed =====
+function buildRegionEmbed() {
+  const regionData = REGION_LIST.map(entry => {
+    const count = regionCounts.get(entry.id) || 0;
+    return { label: entry.label, count };
   });
 
   regionData.sort((a, b) => b.count - a.count);
 
   const medals = ["🏆", "🥈", "🥉"];
-  const roleList = regionData.map((r, i) => {
+  const lines = regionData.map((r, i) => {
     const medal = medals[i] || `#${i + 1}`;
     return `**${medal} ${r.label}** — ${r.count} member(s)`;
-  }).join("\n");
+  });
+
+  const { full, friendlyTime } = malaysiaTimeStrings();
 
   return new EmbedBuilder()
     .setTitle("🌐 Malaysia Region Leaderboard")
-    .setDescription(roleList || "No region roles found.")
+    .setDescription(lines.join("\n") || "No region roles found.")
     .setColor("Green")
-    .setFooter({ text: `Last updated: ${new Date().toLocaleString()}` })
+    .setFooter({ text: `Last updated: ${full} | Today at ${friendlyTime}` })
     .setTimestamp();
 }
 
-async function updateRegionStats(guild) {
+// ===== Update stats in STATS_CHANNEL =====
+async function updateRegionStats(guild, channelId) {
+  if (!channelId) return;
   try {
-    const channel = guild.channels.cache.get(STATS_CHANNEL);
+    const channel = guild.channels.cache.get(channelId);
     if (!channel) return;
 
-    const embed = buildRegionEmbed(guild);
-    const messages = await channel.messages.fetch({ limit: 10 });
-    const botMsg = messages.find(m => m.author.id === guild.client.user.id);
+    const embed = buildRegionEmbed();
+    const messages = await channel.messages.fetch({ limit: 50 }).catch(() => null);
+
+    let botMsg;
+    if (messages) {
+      botMsg = messages.find(m =>
+        m.author?.id === client.user?.id &&
+        m.embeds[0]?.title?.includes("Malaysia Region Leaderboard")
+      );
+    }
 
     if (botMsg) {
-      await botMsg.edit({ embeds: [embed] });
+      await botMsg.edit({ embeds: [embed] }).catch(() => {});
     } else {
-      await channel.send({ embeds: [embed] });
+      await channel.send({ embeds: [embed] }).catch(() => {});
     }
   } catch (err) {
     console.error("❌ Failed to update region stats:", err);
   }
 }
 
-// ===== Pagination for lists =====
-function slicePage(items, page, perPage) {
-  const start = page * perPage;
-  return items.slice(start, start + perPage);
-}
-function pageEmbed({ title, lines, page, perPage, color = 0xffc107 }) {
-  const totalPages = Math.max(1, Math.ceil(lines.length / perPage));
-  const desc = slicePage(lines, page, perPage).join('\n') || '_No entries._';
-  return new EmbedBuilder()
-    .setTitle(title)
-    .setDescription(desc)
-    .setColor(color)
-    .setFooter({ text: `📄 Page ${page + 1}/${totalPages} • total ${lines.length}` });
-}
-
-// ===== Ready =====
-client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-
-  // Rotate presence
-  const activities = [
-    { type: 0, name: 'I am BusyBot | /bb' },
-    { type: 3, name: "you'all 👀" },
-    { type: 2, name: ' /commands 🎶' },
-  ];
-  function setRandomPresence() {
-    try {
-      const a = activities[Math.floor(Math.random() * activities.length)];
-      client.user.setPresence({
-        activities: [{ name: a.name, type: a.type }],
-        status: 'online',
-      });
-    } catch (e) { console.error('Failed presence:', e); }
-  }
-  setRandomPresence();
-  setInterval(setRandomPresence, 10 * 60 * 1000);
-
-  // Auto leaderboard
-  const guild = client.guilds.cache.first();
-  if (guild) {
-    await updateRegionStats(guild);
-    setInterval(() => updateRegionStats(guild), 5 * 60 * 1000);
+// ===== Incremental Updates =====
+client.on("guildMemberAdd", (member) => {
+  if (member.user.bot) return;
+  for (const { id } of REGION_LIST) {
+    if (member.roles.cache.has(id)) {
+      regionCounts.set(id, (regionCounts.get(id) || 0) + 1);
+    }
   }
 });
 
-// ===== Slash Command Handler =====
-client.on('interactionCreate', async (interaction) => {
+client.on("guildMemberRemove", (member) => {
+  if (member.user.bot) return;
+  for (const { id } of REGION_LIST) {
+    if (member.roles.cache.has(id)) {
+      regionCounts.set(id, Math.max(0, (regionCounts.get(id) || 0) - 1));
+    }
+  }
+});
+
+client.on("guildMemberUpdate", (oldM, newM) => {
+  if (newM.user.bot) return;
+  for (const { id } of REGION_LIST) {
+    const hadRole = oldM.roles.cache.has(id);
+    const hasRole = newM.roles.cache.has(id);
+    if (!hadRole && hasRole) {
+      regionCounts.set(id, (regionCounts.get(id) || 0) + 1);
+    } else if (hadRole && !hasRole) {
+      regionCounts.set(id, Math.max(0, (regionCounts.get(id) || 0) - 1));
+    }
+  }
+});
+
+// ===== Ready =====
+client.once("ready", async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+
+  // Init counts once
+  const guild = client.guilds.cache.first();
+  if (guild) {
+    await guild.members.fetch().catch(() => {});
+    for (const { id } of REGION_LIST) {
+      const role = guild.roles.cache.get(id);
+      if (role) {
+        const count = role.members.filter(m => !m.user.bot).size;
+        regionCounts.set(id, count);
+      }
+    }
+
+    // initial update + auto refresh
+    await updateRegionStats(guild, STATS_CHANNEL);
+    setInterval(() => updateRegionStats(guild, STATS_CHANNEL), 5 * 60 * 1000);
+  }
+});
+
+// ===== Commands =====
+client.on("interactionCreate", async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
   const { guild, commandName: cmd } = interaction;
   if (!guild) return;
 
   // Public command
-  if (cmd === 'regions') {
-    const embed = buildRegionEmbed(guild);
+  if (cmd === "regions") {
+    const embed = buildRegionEmbed(); // now from cache
     return interaction.reply({ embeds: [embed] });
-  }
+  }  
 
   // Admin restriction
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
