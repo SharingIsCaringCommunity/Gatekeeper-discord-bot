@@ -17,23 +17,6 @@
 - Removed duplicate UTC timestamp caused by `.setTimestamp()`.  
 - Footer now consistently displays only MYT, e.g.: Last updated (MYT): 10/04/2025, 06:55:42 AM
 
-## v1.6.1 (2025-09-24)  
-**Pardon Fix & Lifetime Ban Updates**
-
-### ✅ What’s new
-- `/pardon` now supports **User IDs directly**:
-  - Works even if the user is lifetime-banned and not in the server anymore.
-  - Automatically resets their warnings to 0 and removes them from the lifetime ban cache.
-- Logs and replies show pardons correctly, even for users not in the guild.
-
-### 🔄 Improvements
-- Auto-ban at 3 warnings is now always treated as a **lifetime ban**.
-- DM embeds for bans now show **who banned the user**.
-- Log channel updated with clearer ban/pardon messages.
-
-### 🛠 Fixes
-- Fixed bug where `/pardon` failed on lifetime-banned users due to missing `User` object.
-
 ---
 
 ## [v1.6.2] — 2025-10-03  
