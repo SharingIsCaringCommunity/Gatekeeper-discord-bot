@@ -1,7 +1,7 @@
 # 📜 Gatekeeper / BusyPang Bot — Changelog
 
 <p align="left">
-  <img src="https://img.shields.io/badge/version-v1.6.1-blue?style=for-the-badge" />
+  <img src="https://img.shields.io/badge/version-v1.6.3-blue?style=for-the-badge" />
   <img src="https://img.shields.io/badge/status-stable-brightgreen?style=for-the-badge" />
   <img src="https://img.shields.io/badge/license-MIT-lightgrey?style=for-the-badge" />
 </p>
