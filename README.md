@@ -8,6 +8,15 @@
 
 ---
 
+## [v1.6.3] — 2025-10-04  
+### 🆕 Features  
+- Leaderboard footer now shows **Malaysia Time (MYT)** instead of server UTC.  
+- Time format switched to **12-hour (AM/PM)** for better readability.  
+
+### 🔧 Fixes  
+- Removed duplicate UTC timestamp caused by `.setTimestamp()`.  
+- Footer now consistently displays only MYT, e.g.: Last updated (MYT): 10/04/2025, 06:55:42 AM
+
 ## v1.6.1 (2025-09-24)  
 **Pardon Fix & Lifetime Ban Updates**
 
@@ -26,6 +35,31 @@
 - Fixed bug where `/pardon` failed on lifetime-banned users due to missing `User` object.
 
 ---
+
+## [v1.6.2] — 2025-10-03  
+### 🆕 Features  
+- Added **Malaysia Region Leaderboard** auto-updates in channel.  
+- Implemented **incremental updates** (listens to role changes, joins/leaves).  
+- `/regions` command shows live leaderboard from cache (no full fetch needed).  
+
+### 🔧 Fixes  
+- Reduced heavy `guild.members.fetch()` calls (only once at startup).  
+- Leaderboard ranks now sort correctly by member count with medals 🏆🥈🥉.  
+
+---
+
+## [v1.6.1] — 2025-10-02  
+### 🆕 Features  
+- Added **automatic refresh** every 5 minutes for leaderboard message.  
+- Leaderboard embed now shows **"Last updated"** footer with timestamp.  
+- Improved warning system (ban after 3rd warning, logs + DM notifications).  
+- Added `/pardon` command to unban by **User ID**.  
+
+### 🔧 Fixes  
+- Fixed bug where pardoned users were not fully removed from warn/ban cache.  
+- Fixed banlist/warnlist pagination issues (now supports multiple pages).  
+
+--- 
 
 ## v1.6.0 (2025-09-24)  
 **Warnings + Ban System Upgrade**
