@@ -12,8 +12,8 @@ const fs = require('fs');
 const path = require('path');
 
 // ===== Environment =====
-const TOKEN       = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL = process.env.LOG_CHANNEL;
+const TOKEN         = process.env.DISCORD_TOKEN;
+const LOG_CHANNEL   = process.env.LOG_CHANNEL;
 const STATS_CHANNEL = process.env.STATS_CHANNEL;
 if (!TOKEN || !LOG_CHANNEL || !STATS_CHANNEL) {
   console.error('❌ Missing environment variables. Make sure DISCORD_TOKEN, LOG_CHANNEL, and STATS_CHANNEL are set.');
