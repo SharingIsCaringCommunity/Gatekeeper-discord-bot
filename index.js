@@ -1,3 +1,6 @@
+// BusyPang / Gatekeeper Bot — Moderation + Region Leaderboard + Keyword Blocker
+// Version v1.7
+
 const {
   Client,
   GatewayIntentBits,
@@ -6,13 +9,14 @@ const {
 } = require('discord.js');
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
 
 // ===== Environment =====
-const TOKEN = process.env.DISCORD_TOKEN;
+const TOKEN       = process.env.DISCORD_TOKEN;
 const LOG_CHANNEL = process.env.LOG_CHANNEL;
-const RULES_LINK = process.env.RULES_LINK || "";
-if (!TOKEN || !LOG_CHANNEL) {
-  console.error('❌ Missing env vars. Set DISCORD_TOKEN and LOG_CHANNEL.');
+const STATS_CHANNEL = process.env.STATS_CHANNEL;
+if (!TOKEN || !LOG_CHANNEL || !STATS_CHANNEL) {
+  console.error('❌ Missing environment variables. Make sure DISCORD_TOKEN, LOG_CHANNEL, and STATS_CHANNEL are set.');
   process.exit(1);
 }
 
@@ -29,60 +33,50 @@ const client = new Client({
     GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildModeration,
   ],
 });
 
-// =============================================
-// Keyword Filtering
-// =============================================
-let keywords = [];
-try {
-  const data = fs.readFileSync('./keywords.json', 'utf8');
-  keywords = JSON.parse(data);
-  console.log(`🧠 Loaded ${keywords.length} blocked keywords.`);
-} catch (err) {
-  console.log('⚠️ No keywords.json found — creating a new one.');
-  fs.writeFileSync('./keywords.json', '[]');
-  keywords = [];
-}
+// ===== State =====
+const bannedUsers = new Set();
+const warningsByGuild = new Map();
+const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'warnlist', 'clearwarns']);
+const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  const content = message.content.toLowerCase();
-  const foundKeyword = keywords.find((kw) => content.includes(kw.toLowerCase()));
-  if (foundKeyword) {
-    await message.delete().catch(() => {});
-    await message.channel.send({
-      content: `🚫 <@${message.author.id}>, your message contained a **blocked keyword**. Please follow the server rules.`,
-    });
-  }
-});
-
-// =============================================
-// Region Leaderboard
-// =============================================
-const REGION_ROLES = {
-  "ROLE_ID_1": ":house_with_garden: NEGERI SEMBILAN",
-  "ROLE_ID_2": ":hot_pepper: KELANTAN",
-  "ROLE_ID_3": ":park: PERAK",
-  "ROLE_ID_4": ":elephant: PAHANG",
-  "ROLE_ID_5": ":cityscape: SELANGOR",
-  "ROLE_ID_6": ":ear_of_rice: KEDAH",
-  "ROLE_ID_7": ":turtle: TERENGGANU",
-  "ROLE_ID_8": ":lion_face: JOHOR",
-  "ROLE_ID_9": ":grapes: PERLIS",
-  "ROLE_ID_10": ":palm_tree: PENANG",
-  "ROLE_ID_11": ":anchor: MALACCA",
-  "ROLE_ID_12": ":orangutan: SARAWAK",
-  "ROLE_ID_13": ":mountain_snow: SABAH",
-  "ROLE_ID_14": ":mosque: FEDERAL TERRITORY (KL/PUTRAJAYA/LABUAN)",
-  "ROLE_ID_15": ":globe_with_meridians: OTHERS"
+// ===== Logging =====
+const log = (guild, content) => {
+  const ch = guild.channels.cache.get(LOG_CHANNEL);
+  if (ch) ch.send({ content }).catch(() => {});
+};
+const getGuildWarnings = (gid) => {
+  let m = warningsByGuild.get(gid);
+  if (!m) { m = new Map(); warningsByGuild.set(gid, m); }
+  return m;
 };
 
-function malaysiaTime() {
-  return new Date().toLocaleString("en-MY", {
-    timeZone: "Asia/Kuala_Lumpur",
-    hour12: true
+// ===== Region Leaderboard =====
+const REGION_ROLES = {
+  [process.env.ROLE_ID_1]: ":house_with_garden: NEGERI SEMBILAN",
+  [process.env.ROLE_ID_2]: ":hot_pepper: KELANTAN",
+  [process.env.ROLE_ID_3]: ":park: PERAK",
+  [process.env.ROLE_ID_4]: ":elephant: PAHANG",
+  [process.env.ROLE_ID_5]: ":cityscape: SELANGOR",
+  [process.env.ROLE_ID_6]: ":ear_of_rice: KEDAH",
+  [process.env.ROLE_ID_7]: ":turtle: TERENGGANU",
+  [process.env.ROLE_ID_8]: ":lion_face: JOHOR",
+  [process.env.ROLE_ID_9]: ":grapes: PERLIS",
+  [process.env.ROLE_ID_10]: ":palm_tree: PENANG",
+  [process.env.ROLE_ID_11]: ":anchor: MALACCA",
+  [process.env.ROLE_ID_12]: ":orangutan: SARAWAK",
+  [process.env.ROLE_ID_13]: ":mountain_snow: SABAH",
+  [process.env.ROLE_ID_14]: ":mosque: FEDERAL TERRITORY (KL/PUTRAJAYA/LABUAN)",
+  [process.env.ROLE_ID_15]: ":globe_with_meridians: OTHERS",
+};
+
+function formatMYTTime(date) {
+  return date.toLocaleString('en-MY', {
+    timeZone: 'Asia/Kuala_Lumpur',
+    hour12: true,
   });
 }
 
@@ -103,94 +97,118 @@ function buildRegionEmbed(guild) {
     .setTitle("🌐 Malaysia Region Leaderboard")
     .setDescription(roleList || "No region roles found.")
     .setColor("Green")
-    .setFooter({ text: `🕒 Last updated: ${malaysiaTime()} MYT` })
+    .setFooter({ text: `Last updated: ${formatMYTTime(new Date())}` })
     .setTimestamp();
 }
 
-async function updateRegionStats(guild, channelId) {
-  const channel = guild.channels.cache.get(channelId);
-  if (!channel) return;
-  const embed = buildRegionEmbed(guild);
-  const messages = await channel.messages.fetch({ limit: 10 });
-  const botMsg = messages.find(m => m.author.id === guild.client.user.id);
-  if (botMsg) {
-    await botMsg.edit({ embeds: [embed] });
-  } else {
-    await channel.send({ embeds: [embed] });
-  }
-}
-
-// =============================================
-// Moderation System
-// =============================================
-const bannedUsers = new Set();
-const warningsByGuild = new Map();
-const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'warnlist', 'clearwarns']);
-const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
-
-const log = (guild, content) => {
-  const ch = guild.channels.cache.get(LOG_CHANNEL);
-  if (ch) ch.send({ content }).catch(() => {});
-};
-const getGuildWarnings = (gid) => {
-  let m = warningsByGuild.get(gid);
-  if (!m) { m = new Map(); warningsByGuild.set(gid, m); }
-  return m;
-};
-
-// =============================================
-// Activity Randomizer
-// =============================================
-const activities = [
-  { type: 0, name: 'I am BusyBot | /bb' },
-  { type: 3, name: "you'all 👀" },
-  { type: 2, name: '/commands 🎶' },
-];
-
-function setRandomPresence() {
+async function updateRegionStats(guild) {
   try {
-    const a = activities[Math.floor(Math.random() * activities.length)];
-    client.user.setPresence({
-      activities: [{ name: a.name, type: a.type }],
-      status: 'online',
-    });
-  } catch (e) {
-    console.error('Failed presence:', e);
+    const channel = guild.channels.cache.get(STATS_CHANNEL);
+    if (!channel) return;
+    const embed = buildRegionEmbed(guild);
+    const messages = await channel.messages.fetch({ limit: 10 });
+    const botMsg = messages.find(m => m.author.id === guild.client.user.id);
+
+    if (botMsg) {
+      await botMsg.edit({ embeds: [embed] });
+    } else {
+      await channel.send({ embeds: [embed] });
+    }
+  } catch (err) {
+    console.error("❌ Failed to update region stats:", err);
   }
 }
 
-// =============================================
-// Ready Event
-// =============================================
-client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag}`);
-  setRandomPresence();
-  setInterval(setRandomPresence, 10 * 60 * 1000);
+// ===== Keyword Moderation =====
+const keywordsFile = path.join(__dirname, 'keywords.json');
+if (!fs.existsSync(keywordsFile)) fs.writeFileSync(keywordsFile, JSON.stringify([]));
+const loadKeywords = () => JSON.parse(fs.readFileSync(keywordsFile, 'utf8'));
+const saveKeywords = (w) => fs.writeFileSync(keywordsFile, JSON.stringify(w, null, 2));
 
-  // Auto leaderboard refresh
-  const guild = client.guilds.cache.first();
-  const channelId = "STATS_CHANNEL_ID"; // your leaderboard channel
-  if (guild) {
-    await updateRegionStats(guild, channelId);
-    setInterval(() => updateRegionStats(guild, channelId), 5 * 60 * 1000);
+client.on('messageCreate', async (message) => {
+  if (message.author.bot) return;
+  const keywords = loadKeywords();
+  const contentLower = message.content.toLowerCase();
+  if (keywords.some(kw => contentLower.includes(kw))) {
+    await message.delete().catch(() => {});
+    await message.channel.send(`🚫 <@${message.author.id}> your message contained a blocked word.`);
   }
 });
 
-// =============================================
-// Slash Command Handler
-// =============================================
+// ===== Activity Randomizer =====
+client.once('ready', async () => {
+  console.log(`✅ Logged in as ${client.user.tag}`);
+
+  const activities = [
+    { type: 0, name: 'I am BusyBot | /bb' },
+    { type: 3, name: "you'all 👀" },
+    { type: 2, name: '/commands 🎶' },
+  ];
+  function setRandomPresence() {
+    try {
+      const a = activities[Math.floor(Math.random() * activities.length)];
+      client.user.setPresence({ activities: [{ name: a.name, type: a.type }], status: 'online' });
+    } catch (e) { console.error('Failed presence:', e); }
+  }
+  setRandomPresence();
+  setInterval(setRandomPresence, 10 * 60 * 1000);
+
+  const guild = client.guilds.cache.first();
+  if (guild) {
+    await updateRegionStats(guild);
+    setInterval(() => updateRegionStats(guild), 5 * 60 * 1000);
+  }
+});
+
+// ===== Role Updates Trigger =====
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  const regionRoleIds = Object.keys(REGION_ROLES);
+  const oldRoles = oldMember.roles.cache;
+  const newRoles = newMember.roles.cache;
+  const changed = regionRoleIds.some(rid => oldRoles.has(rid) !== newRoles.has(rid));
+  if (changed) {
+    await updateRegionStats(newMember.guild);
+  }
+});
+
+// ===== Slash Command Handler =====
 client.on('interactionCreate', async (interaction) => {
   if (!interaction.isChatInputCommand()) return;
-  const { guild, commandName: cmd } = interaction;
-  if (!guild) return;
+  const { commandName: cmd, guild } = interaction;
 
-  // Everyone: /regions
+  // Keyword Management
+  if (cmd === 'addkeyword') {
+    const word = interaction.options.getString('word').toLowerCase();
+    const keywords = loadKeywords();
+    if (keywords.includes(word))
+      return interaction.reply({ content: `⚠️ Keyword \`${word}\` already exists.`, ephemeral: true });
+    keywords.push(word);
+    saveKeywords(keywords);
+    return interaction.reply({ content: `✅ Added keyword: \`${word}\``, ephemeral: true });
+  }
+  if (cmd === 'removekeyword') {
+    const word = interaction.options.getString('word').toLowerCase();
+    let keywords = loadKeywords();
+    if (!keywords.includes(word))
+      return interaction.reply({ content: `⚠️ Keyword \`${word}\` not found.`, ephemeral: true });
+    keywords = keywords.filter(k => k !== word);
+    saveKeywords(keywords);
+    return interaction.reply({ content: `✅ Removed keyword: \`${word}\``, ephemeral: true });
+  }
+  if (cmd === 'listkeywords') {
+    const keywords = loadKeywords();
+    if (keywords.length === 0)
+      return interaction.reply({ content: `🚫 No blocked keywords found.`, ephemeral: true });
+    return interaction.reply({ content: `🛡️ Blocked keywords:\n\`\`\`${keywords.join(', ')}\`\`\``, ephemeral: true });
+  }
+
+  // Public: /regions
   if (cmd === 'regions') {
     const embed = buildRegionEmbed(guild);
     return interaction.reply({ embeds: [embed] });
   }
 
-  // Admin restriction
+  // ===== Warning / Ban System =====
   if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
     return interaction.reply({ content: '⛔ Admin only.' });
   }
@@ -200,22 +218,25 @@ client.on('interactionCreate', async (interaction) => {
       const emb = new EmbedBuilder()
         .setTitle('🤖 BusyPang — Help & Commands')
         .setColor(0x00b3ff)
-        .setDescription(
-          [
-            '### 👥 Everyone',
-            '`/warnings [@user]` — Check warnings',
-            '`/regions` — Show region leaderboard',
-            '`/bb` — Show this help',
-            '',
-            '### 🛡️ Admin only',
-            '`/warn @user [reason]` — Add warning (3 = auto-ban)',
-            '`/clearwarns @user` — Reset warnings',
-            '`/ban @user [reason]` — Ban immediately',
-            '`/pardon user_id:<ID>` — Unban by ID',
-            '`/banlist` — Show ban list',
-            '`/warnlist` — Show warning list',
-          ].join('\n')
-        );
+        .setDescription([
+          '### 👥 Everyone',
+          '`/warnings [@user]` — Check warnings',
+          '`/regions` — Show region leaderboard',
+          '`/bb` — Show this help',
+          '',
+          '### 🛡️ Admin only',
+          '`/warn @user [reason]` — Add warning (3 = auto-ban)',
+          '`/clearwarns @user` — Reset warnings',
+          '`/ban @user` — Ban immediately',
+          '`/pardon user_id` — Unban by ID',
+          '`/banlist` — Show ban list',
+          '`/warnlist` — Show warning list',
+          '',
+          '### 🪄 Keywords',
+          '`/addkeyword word` — Add blocked word',
+          '`/removekeyword word` — Remove blocked word',
+          '`/listkeywords` — Show all keywords',
+        ].join('\n'));
       return interaction.reply({ embeds: [emb] });
     }
 
@@ -287,11 +308,11 @@ client.on('interactionCreate', async (interaction) => {
       for (const [id, ban] of bans) {
         lines.push(`• **${ban.user.tag}** (<@${id}>)`);
       }
-      const emb = new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle('📕 Ban List')
         .setDescription(lines.join('\n') || '_No bans._')
         .setColor(0xff0000);
-      return interaction.reply({ embeds: [emb] });
+      return interaction.reply({ embeds: [embed] });
     }
 
     if (cmd === 'warnlist') {
@@ -303,11 +324,11 @@ client.on('interactionCreate', async (interaction) => {
           lines.push(`• ${u ? u.tag : id} — ${count}/3`);
         }
       }
-      const emb = new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle('🧾 Warn List')
         .setDescription(lines.join('\n') || '_No warnings._')
         .setColor(0xffc107);
-      return interaction.reply({ embeds: [emb] });
+      return interaction.reply({ embeds: [embed] });
     }
 
   } catch (err) {
@@ -316,9 +337,7 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// =============================================
-// Ban Handlers
-// =============================================
+// ===== Ban Handlers =====
 client.on('guildBanAdd', (ban) => bannedUsers.add(ban.user.id));
 client.on('guildBanRemove', (ban) => bannedUsers.delete(ban.user.id));
 
