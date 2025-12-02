@@ -1,11 +1,16 @@
+// index.js
 // BusyPang / Gatekeeper Bot — Moderation + Region Leaderboard + Keyword Blocker
-// Version v1.7
+// Version v1.7 (cleaned & fixed)
 
 const {
   Client,
   GatewayIntentBits,
   PermissionsBitField,
   EmbedBuilder,
+  ActionRowBuilder,
+  ButtonBuilder,
+  ButtonStyle,
+  ComponentType,
 } = require('discord.js');
 const express = require('express');
 const fs = require('fs');
@@ -15,8 +20,11 @@ const path = require('path');
 const TOKEN         = process.env.DISCORD_TOKEN;
 const LOG_CHANNEL   = process.env.LOG_CHANNEL;
 const STATS_CHANNEL = process.env.STATS_CHANNEL;
+const RULES_LINK    = process.env.RULES_LINK || '';
+const FORCE_FETCH_MEMBERS = (process.env.FORCE_FETCH_MEMBERS || 'false').toLowerCase() === 'true';
+
 if (!TOKEN || !LOG_CHANNEL || !STATS_CHANNEL) {
-  console.error('❌ Missing environment variables. Make sure DISCORD_TOKEN, LOG_CHANNEL, and STATS_CHANNEL are set.');
+  console.error('❌ Missing environment variables. Make sure DISCORD_TOKEN, LOG_CHANNEL and STATS_CHANNEL are set.');
   process.exit(1);
 }
 
@@ -38,15 +46,24 @@ const client = new Client({
 });
 
 // ===== State =====
-const bannedUsers = new Set();
-const warningsByGuild = new Map();
-const ADMIN_CMDS = new Set(['warn', 'ban', 'pardon', 'banlist', 'warnlist', 'clearwarns']);
-const isAdmin = (i) => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
+const bannedUsers = new Set();                 // global lifetime ban cache
+const warningsByGuild = new Map();             // Map<guildId, Map<userId, count>>
+const ADMIN_CMDS = new Set(['warn','ban','pardon','banlist','warnlist','clearwarns','addkeyword','removekeyword','listkeywords']);
+const isAdmin = (interactionOrMember) => {
+  // interaction -> has memberPermissions, otherwise fallback
+  try {
+    return (interactionOrMember.memberPermissions && interactionOrMember.memberPermissions.has(PermissionsBitField.Flags.Administrator))
+      || (interactionOrMember.member && interactionOrMember.member.permissions && interactionOrMember.member.permissions.has && interactionOrMember.member.permissions.has(PermissionsBitField.Flags.Administrator))
+      || false;
+  } catch { return false; }
+};
 
-// ===== Logging =====
+// ===== Helpers =====
 const log = (guild, content) => {
-  const ch = guild.channels.cache.get(LOG_CHANNEL);
-  if (ch) ch.send({ content }).catch(() => {});
+  try {
+    const ch = guild.channels.cache.get(LOG_CHANNEL);
+    if (ch) ch.send({ content }).catch(() => {});
+  } catch {}
 };
 const getGuildWarnings = (gid) => {
   let m = warningsByGuild.get(gid);
@@ -54,7 +71,8 @@ const getGuildWarnings = (gid) => {
   return m;
 };
 
-// ===== Region Leaderboard =====
+// ===== Region Roles (from env) =====
+// Set ROLE_ID_1 ... ROLE_ID_15 in Railway env to actual role IDs
 const REGION_ROLES = {
   [process.env.ROLE_ID_1]: ":house_with_garden: NEGERI SEMBILAN",
   [process.env.ROLE_ID_2]: ":hot_pepper: KELANTAN",
@@ -73,162 +91,189 @@ const REGION_ROLES = {
   [process.env.ROLE_ID_15]: ":globe_with_meridians: OTHERS",
 };
 
-function formatMYTTime(date) {
-  return date.toLocaleString('en-MY', {
+// timezone helper (Malaysia MYT, 12-hour)
+function formatMYTTime(date = new Date()) {
+  return new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Kuala_Lumpur',
+    year: 'numeric', month: '2-digit', day: '2-digit',
+    hour: '2-digit', minute: '2-digit', second: '2-digit',
     hour12: true,
-  });
+  }).format(date);
 }
 
+// Build region embed with counts
 function buildRegionEmbed(guild) {
-  let regionData = Object.entries(REGION_ROLES).map(([id, label]) => {
+  const regionData = Object.entries(REGION_ROLES).map(([id, label]) => {
     const role = guild.roles.cache.get(id);
     return { label, count: role ? role.members.size : 0 };
-  });
+  }).sort((a,b) => b.count - a.count);
 
-  regionData.sort((a, b) => b.count - a.count);
-  const medals = ["🏆", "🥈", "🥉"];
-  const roleList = regionData.map((r, i) => {
-    const medal = medals[i] || `#${i + 1}`;
-    return `**${medal} ${r.label}** — ${r.count} member(s)`;
-  }).join("\n");
-
+  const medals = ["🏆","🥈","🥉"];
+  const lines = regionData.map((r,i) => `${medals[i] || `#${i+1}`} **${r.label}** — ${r.count} member(s)`);
   return new EmbedBuilder()
     .setTitle("🌐 Malaysia Region Leaderboard")
-    .setDescription(roleList || "No region roles found.")
-    .setColor("Green")
+    .setDescription(lines.join('\n') || '_No region roles found._')
+    .setColor(0x2ecc71)
     .setFooter({ text: `Last updated: ${formatMYTTime(new Date())}` })
     .setTimestamp();
 }
 
+// update region stats message in the configured stats channel
 async function updateRegionStats(guild) {
   try {
+    if (FORCE_FETCH_MEMBERS) {
+      // careful: this fetches all members — only enable if acceptable for your guild
+      await guild.members.fetch().catch(() => {});
+    }
     const channel = guild.channels.cache.get(STATS_CHANNEL);
     if (!channel) return;
     const embed = buildRegionEmbed(guild);
-    const messages = await channel.messages.fetch({ limit: 10 });
-    const botMsg = messages.find(m => m.author.id === guild.client.user.id);
-
+    const messages = await channel.messages.fetch({ limit: 10 }).catch(() => []);
+    const botMsg = messages.find(m => m.author && m.author.id === client.user.id);
     if (botMsg) {
-      await botMsg.edit({ embeds: [embed] });
+      await botMsg.edit({ embeds: [embed] }).catch(() => {});
     } else {
-      await channel.send({ embeds: [embed] });
+      await channel.send({ embeds: [embed] }).catch(() => {});
     }
   } catch (err) {
-    console.error("❌ Failed to update region stats:", err);
+    console.error('Failed to updateRegionStats:', err);
   }
 }
 
-// ===== Keyword Moderation =====
+// ===== Keyword Moderation (file-based) =====
 const keywordsFile = path.join(__dirname, 'keywords.json');
 if (!fs.existsSync(keywordsFile)) fs.writeFileSync(keywordsFile, JSON.stringify([]));
-const loadKeywords = () => JSON.parse(fs.readFileSync(keywordsFile, 'utf8'));
-const saveKeywords = (w) => fs.writeFileSync(keywordsFile, JSON.stringify(w, null, 2));
+const loadKeywords = () => {
+  try { return JSON.parse(fs.readFileSync(keywordsFile, 'utf8') || '[]'); } catch { return []; }
+};
+const saveKeywords = (arr) => fs.writeFileSync(keywordsFile, JSON.stringify(arr, null, 2));
 
+// delete and mention + moderator log when blocked keyword found
 client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  const keywords = loadKeywords();
-  const contentLower = message.content.toLowerCase();
-  if (keywords.some(kw => contentLower.includes(kw))) {
-    await message.delete().catch(() => {});
-    await message.channel.send(`🚫 <@${message.author.id}> your message contained a blocked word.`);
+  try {
+    if (message.author.bot) return;
+    const keywords = loadKeywords();
+    if (!keywords.length) return;
+    const content = (message.content || '').toLowerCase();
+    const found = keywords.find(k => k && content.includes(k.toLowerCase()));
+    if (found) {
+      await message.delete().catch(() => {});
+      await message.channel.send({ content: `🚫 <@${message.author.id}>, your message contained a blocked keyword (\`${found}\`).` }).catch(() => {});
+      // log
+      if (message.guild) log(message.guild, `🛡️ Blocked message by <@${message.author.id}> in #${message.channel.name} — matched keyword: \`${found}\``);
+    }
+  } catch (e) {
+    console.error('messageCreate handler error', e);
   }
 });
 
 // ===== Activity Randomizer =====
+function setRandomPresence() {
+  const activities = [
+    { type: 0, name: 'I am BusyBot | /bb' },      // Playing
+    { type: 3, name: "you'all 👀" },              // Watching
+    { type: 2, name: '/commands 🎶' },            // Listening
+  ];
+  const a = activities[Math.floor(Math.random() * activities.length)];
+  try {
+    client.user.setPresence({ activities: [{ name: a.name, type: a.type }], status: 'online' });
+  } catch (e) { console.error('setPresence failed', e); }
+}
+
+// ===== Boot / Sync =====
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  const activities = [
-    { type: 0, name: 'I am BusyBot | /bb' },
-    { type: 3, name: "you'all 👀" },
-    { type: 2, name: '/commands 🎶' },
-  ];
-  function setRandomPresence() {
+  // sync bans for all guilds on startup
+  for (const [, guild] of client.guilds.cache) {
     try {
-      const a = activities[Math.floor(Math.random() * activities.length)];
-      client.user.setPresence({ activities: [{ name: a.name, type: a.type }], status: 'online' });
-    } catch (e) { console.error('Failed presence:', e); }
+      const bans = await guild.bans.fetch().catch(() => new Map());
+      for (const [id] of bans) bannedUsers.add(id);
+      console.log(`🔄 Synced ${bans.size || 0} bans for ${guild.name}`);
+    } catch (e) {
+      console.warn('Failed to sync bans for', guild?.name, e?.message || e);
+    }
   }
+
+  // presence
   setRandomPresence();
   setInterval(setRandomPresence, 10 * 60 * 1000);
 
+  // initial region stats + periodic update
   const guild = client.guilds.cache.first();
   if (guild) {
     await updateRegionStats(guild);
-    setInterval(() => updateRegionStats(guild), 5 * 60 * 1000);
+    setInterval(() => updateRegionStats(guild), 5 * 60 * 1000); // refresh every 5 minutes
   }
 });
 
-// ===== Role Updates Trigger =====
+// update region stats on role/membership changes (incremental)
 client.on('guildMemberUpdate', async (oldMember, newMember) => {
-  const regionRoleIds = Object.keys(REGION_ROLES);
-  const oldRoles = oldMember.roles.cache;
-  const newRoles = newMember.roles.cache;
-  const changed = regionRoleIds.some(rid => oldRoles.has(rid) !== newRoles.has(rid));
-  if (changed) {
-    await updateRegionStats(newMember.guild);
-  }
+  try {
+    const regionRoleIds = Object.keys(REGION_ROLES).filter(Boolean);
+    const changed = regionRoleIds.some(rid => oldMember.roles.cache.has(rid) !== newMember.roles.cache.has(rid));
+    if (changed) await updateRegionStats(newMember.guild);
+  } catch (e) { console.error('guildMemberUpdate error', e); }
 });
+client.on('guildMemberAdd', async (m) => { try { await updateRegionStats(m.guild); } catch {} });
+client.on('guildMemberRemove', async (m) => { try { await updateRegionStats(m.guild); } catch {} });
+client.on('roleDelete', async (role) => { try { await updateRegionStats(role.guild); } catch {} });
 
 // ===== Slash Command Handler =====
 client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-  const { commandName: cmd, guild } = interaction;
-
-  // Keyword Management
-  if (cmd === 'addkeyword') {
-    const word = interaction.options.getString('word').toLowerCase();
-    const keywords = loadKeywords();
-    if (keywords.includes(word))
-      return interaction.reply({ content: `⚠️ Keyword \`${word}\` already exists.`, ephemeral: true });
-    keywords.push(word);
-    saveKeywords(keywords);
-    return interaction.reply({ content: `✅ Added keyword: \`${word}\``, ephemeral: true });
-  }
-  if (cmd === 'removekeyword') {
-    const word = interaction.options.getString('word').toLowerCase();
-    let keywords = loadKeywords();
-    if (!keywords.includes(word))
-      return interaction.reply({ content: `⚠️ Keyword \`${word}\` not found.`, ephemeral: true });
-    keywords = keywords.filter(k => k !== word);
-    saveKeywords(keywords);
-    return interaction.reply({ content: `✅ Removed keyword: \`${word}\``, ephemeral: true });
-  }
-  if (cmd === 'listkeywords') {
-    const keywords = loadKeywords();
-    if (keywords.length === 0)
-      return interaction.reply({ content: `🚫 No blocked keywords found.`, ephemeral: true });
-    return interaction.reply({ content: `🛡️ Blocked keywords:\n\`\`\`${keywords.join(', ')}\`\`\``, ephemeral: true });
-  }
-
-  // Public: /regions
-  if (cmd === 'regions') {
-    const embed = buildRegionEmbed(guild);
-    return interaction.reply({ embeds: [embed] });
-  }
-
-  // ===== Warning / Ban System =====
-  if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
-    return interaction.reply({ content: '⛔ Admin only.' });
-  }
-
   try {
+    if (!interaction.isChatInputCommand()) return;
+    const { commandName: cmd, guild } = interaction;
+    if (!guild) return interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
+
+    // Admin-only guard for admin commands
+    if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
+      return interaction.reply({ content: '⛔ You must be an Admin to run this command.', ephemeral: true });
+    }
+
+    // Keyword management
+    if (cmd === 'addkeyword') {
+      const word = interaction.options.getString('word').toLowerCase();
+      const arr = loadKeywords();
+      if (arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` already exists.`, ephemeral: true });
+      arr.push(word); saveKeywords(arr);
+      return interaction.reply({ content: `✅ Added keyword: \`${word}\``, ephemeral: true });
+    }
+    if (cmd === 'removekeyword') {
+      const word = interaction.options.getString('word').toLowerCase();
+      let arr = loadKeywords();
+      if (!arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` not found.`, ephemeral: true });
+      arr = arr.filter(x => x !== word); saveKeywords(arr);
+      return interaction.reply({ content: `✅ Removed keyword: \`${word}\``, ephemeral: true });
+    }
+    if (cmd === 'listkeywords') {
+      const arr = loadKeywords();
+      if (!arr.length) return interaction.reply({ content: `🚫 No blocked keywords.`, ephemeral: true });
+      return interaction.reply({ content: `🛡️ Blocked keywords:\n\`\`\`${arr.join(', ')}\`\`\``, ephemeral: true });
+    }
+
+    // regions (public)
+    if (cmd === 'regions') {
+      const embed = buildRegionEmbed(guild);
+      return interaction.reply({ embeds: [embed] });
+    }
+
+    // help / bb
     if (cmd === 'bb') {
       const emb = new EmbedBuilder()
         .setTitle('🤖 BusyPang — Help & Commands')
         .setColor(0x00b3ff)
         .setDescription([
           '### 👥 Everyone',
-          '`/warnings [@user]` — Check warnings',
+          '`/warnings [member]` — Check warnings (yourself or another)',
           '`/regions` — Show region leaderboard',
           '`/bb` — Show this help',
           '',
           '### 🛡️ Admin only',
-          '`/warn @user [reason]` — Add warning (3 = auto-ban)',
-          '`/clearwarns @user` — Reset warnings',
-          '`/ban @user` — Ban immediately',
-          '`/pardon user_id` — Unban by ID',
+          '`/warn @member [reason]` — Add warning (3 = auto-ban)',
+          '`/clearwarns @member` — Reset warnings',
+          '`/ban @member [reason]` — Ban immediately',
+          '`/pardon user_id` — Unban by ID & reset warnings',
           '`/banlist` — Show ban list',
           '`/warnlist` — Show warning list',
           '',
@@ -240,6 +285,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ embeds: [emb] });
     }
 
+    // warnings (public checking)
     if (cmd === 'warnings') {
       const target = interaction.options.getUser('member') || interaction.user;
       const warnMap = getGuildWarnings(guild.id);
@@ -247,6 +293,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `🧾 **${target.tag}** has **${count}/3** warnings.` });
     }
 
+    // warn (admin)
     if (cmd === 'warn') {
       const user = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
@@ -255,90 +302,164 @@ client.on('interactionCreate', async (interaction) => {
       const next = Math.min(3, current + 1);
       warnMap.set(user.id, next);
 
-      await interaction.reply(`⚠️ Warned **${user}** — now at **${next}/3**. 📝 ${reason}`);
-      log(guild, `⚠️ ${interaction.user.tag} warned ${user.tag} — ${next}/3`);
+      // DM embed to user
+      try {
+        const dm = new EmbedBuilder()
+          .setTitle('⚠️ You have received a warning')
+          .setDescription(`You have received a warning in **${guild.name}**.`)
+          .addFields(
+            { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
+            { name: 'Reason', value: `${reason}`, inline: false },
+            { name: 'Warning Count', value: `${next}/3`, inline: true },
+          )
+          .setFooter({ text: RULES_LINK ? 'Please review the server rules.' : '' })
+          .setTimestamp();
+        if (RULES_LINK) dm.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
+        await user.send({ embeds: [dm] }).catch(() => {});
+      } catch {}
 
+      await interaction.reply({ content: `⚠️ Warned **${user.tag}** — now at **${next}/3**. 📝 ${reason}` });
+      log(guild, `⚠️ ${interaction.user.tag} warned ${user.tag} — ${next}/3 — ${reason}`);
+
+      // auto-ban at 3
       if (next >= 3) {
         bannedUsers.add(user.id);
         try {
-          await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings` });
-          await interaction.followUp(`🚫 ${user.tag} reached 3 warnings and was banned.`);
-        } catch {
-          await interaction.followUp(`⚠️ Could not ban ${user.tag}.`);
+          await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (by ${interaction.user.tag})` });
+          // DM about ban
+          try {
+            const banDM = new EmbedBuilder()
+              .setTitle('🚫 You have been banned')
+              .setDescription(`You have been **banned** from **${guild.name}**.`)
+              .addFields(
+                { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
+                { name: 'Reason', value: `3 warnings — last: ${reason}`, inline: false },
+                { name: 'Type', value: 'Lifetime ban', inline: true },
+              )
+              .setTimestamp();
+            if (RULES_LINK) banDM.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
+            await user.send({ embeds: [banDM] }).catch(() => {});
+          } catch {}
+          await interaction.followUp({ content: `🚫 **${user.tag}** reached 3/3 warnings and was banned for life.` });
+          log(guild, `🚫 Auto-banned ${user.tag} at 3 warnings (by ${interaction.user.tag}).`);
+        } catch (e) {
+          console.error('Auto-ban error', e);
+          await interaction.followUp({ content: `⚠️ Reached 3 warnings but could not ban ${user.tag}. Check my role/permissions.` });
+          log(guild, `⚠️ Could not auto-ban ${user.tag} at 3 warnings — role/permission issue.`);
         }
       }
       return;
     }
 
+    // clearwarns (admin)
     if (cmd === 'clearwarns') {
       const user = interaction.options.getUser('member');
-      getGuildWarnings(guild.id).set(user.id, 0);
-      return interaction.reply(`🧹 Cleared warnings for ${user.tag}.`);
+      const warnMap = getGuildWarnings(guild.id);
+      warnMap.set(user.id, 0);
+      await interaction.reply({ content: `🧹 Cleared warnings for **${user.tag}**.` });
+      log(guild, `🧹 ${interaction.user.tag} cleared warnings for ${user.tag}.`);
+      return;
     }
 
+    // ban (admin)
     if (cmd === 'ban') {
       const user = interaction.options.getUser('member');
-      const reason = interaction.options.getString('reason') || `Manual ban`;
+      const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
       bannedUsers.add(user.id);
       try {
         await guild.members.ban(user.id, { reason });
-        await interaction.reply(`🚫 Banned ${user.tag}. 📝 ${reason}`);
-      } catch {
-        await interaction.reply(`⚠️ Could not ban ${user.tag}.`);
+        // DM to user
+        try {
+          const banDM = new EmbedBuilder()
+            .setTitle('🚫 You have been banned')
+            .setDescription(`You have been **banned** from **${guild.name}**.`)
+            .addFields(
+              { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
+              { name: 'Reason', value: reason, inline: false },
+              { name: 'Type', value: 'Lifetime ban', inline: true },
+            )
+            .setTimestamp();
+          if (RULES_LINK) banDM.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
+          await user.send({ embeds: [banDM] }).catch(() => {});
+        } catch {}
+        await interaction.reply({ content: `🚫 Banned **${user.tag}**. 📝 ${reason}` });
+        log(guild, `🚫 ${interaction.user.tag} banned ${user.tag} — ${reason}`);
+      } catch (e) {
+        console.error('ban error', e);
+        await interaction.reply({ content: '⚠️ Could not ban that user — check my role position & permissions.' });
       }
       return;
     }
 
+    // pardon (admin) — unban by user ID (works even if user not in server)
     if (cmd === 'pardon') {
       const userId = interaction.options.getString('user_id');
+      const reason = interaction.options.getString('reason') || `Pardon by ${interaction.user.tag}`;
       bannedUsers.delete(userId);
       getGuildWarnings(guild.id).set(userId, 0);
       try {
-        await guild.bans.remove(userId);
-        await interaction.reply(`✅ Pardoned <@${userId}>`);
-      } catch {
-        await interaction.reply(`⚠️ Could not unban ID ${userId}`);
+        await guild.bans.remove(userId, reason);
+        // try fetch tag
+        let tag = userId;
+        try { const u = await client.users.fetch(userId); tag = u.tag || userId; } catch {}
+        await interaction.reply({ content: `✅ Pardoned **<@${userId}>** (${tag}). 📝 ${reason}` });
+        log(guild, `✅ ${interaction.user.tag} pardoned ${userId} (${tag}) — ${reason}`);
+      } catch (e) {
+        console.error('pardon error', e);
+        await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).' });
       }
       return;
     }
 
+    // banlist (admin)
     if (cmd === 'banlist') {
       const bans = await guild.bans.fetch();
       const lines = [];
-      for (const [id, ban] of bans) {
-        lines.push(`• **${ban.user.tag}** (<@${id}>)`);
+      for (const [id, b] of bans) {
+        lines.push(`• **${b.user.tag}** (<@${id}>)`);
       }
       const embed = new EmbedBuilder()
-        .setTitle('📕 Ban List')
+        .setTitle('📕 Lifetime Ban List')
         .setDescription(lines.join('\n') || '_No bans._')
         .setColor(0xff0000);
       return interaction.reply({ embeds: [embed] });
     }
 
+    // warnlist (admin)
     if (cmd === 'warnlist') {
       const warnMap = getGuildWarnings(guild.id);
+      const entries = [...warnMap.entries()].filter(([,c]) => c > 0);
       const lines = [];
-      for (const [id, count] of warnMap.entries()) {
-        if (count > 0) {
-          const u = await client.users.fetch(id).catch(() => null);
-          lines.push(`• ${u ? u.tag : id} — ${count}/3`);
-        }
+      for (const [id, count] of entries) {
+        let tag = id;
+        try { const u = await client.users.fetch(id); tag = u.tag; } catch {}
+        lines.push(`• **${tag}** — ${count}/3 (<@${id}>)`);
       }
       const embed = new EmbedBuilder()
-        .setTitle('🧾 Warn List')
+        .setTitle('🧾 Warning List')
         .setDescription(lines.join('\n') || '_No warnings._')
         .setColor(0xffc107);
       return interaction.reply({ embeds: [embed] });
     }
 
   } catch (err) {
-    console.error(err);
-    if (!interaction.replied) interaction.reply({ content: '❌ Error occurred.' });
+    console.error('interaction handler error', err);
+    if (!interaction.replied) interaction.reply({ content: '❌ Unexpected error. Try again later.', ephemeral: true }).catch(()=>{});
   }
 });
 
-// ===== Ban Handlers =====
+// ===== Ban handlers keep cache in sync =====
 client.on('guildBanAdd', (ban) => bannedUsers.add(ban.user.id));
 client.on('guildBanRemove', (ban) => bannedUsers.delete(ban.user.id));
 
-client.login(TOKEN);
+// ===== Safety listeners =====
+client.on('error', console.error);
+client.on('shardError', console.error);
+process.on('unhandledRejection', console.error);
+process.on('uncaughtException', console.error);
+
+// ===== Start =====
+client.login(TOKEN).catch(err => {
+  console.error('Failed to login:', err);
+  process.exit(1);
+});
