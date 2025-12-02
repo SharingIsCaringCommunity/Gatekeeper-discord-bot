@@ -181,7 +181,7 @@ function setRandomPresence() {
 }
 
 // ===== Boot / Sync =====
-client.once('ready', async () => {
+client.once('clientReady', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
   // sync bans for all guilds on startup
