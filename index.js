@@ -2,11 +2,6 @@
 // BusyPang / Gatekeeper Bot — Moderation + Region Leaderboard + Keyword Blocker
 // Version v1.8 (final)
 
-// NOTE: Put your env variables in Railway or .env:
-// DISCORD_TOKEN, LOG_CHANNEL, STATS_CHANNEL, CLIENT_ID, GUILD_ID,
-// ROLE_ID_1 ... ROLE_ID_15, VERIFIED_ROLE_ID, RULES_LINK (optional),
-// FORCE_FETCH_MEMBERS = "true" to force fetching guild members (careful)
-
 const {
   Client,
   GatewayIntentBits,
