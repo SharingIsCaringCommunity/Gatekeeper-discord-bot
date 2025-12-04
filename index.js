@@ -1,7 +1,11 @@
 // index.js
-// BusyPang / Gatekeeper Bot — Moderation + Region Leaderboard + Keyword Blocker
-// Version v1.8 (final)
-
+// BusyPang / Gatekeeper — Full runtime
+// Requirements: Node >=18, discord.js v14.x, express
+// Env vars required:
+//   DISCORD_TOKEN, CLIENT_ID (optional for logging), LOG_CHANNEL, STATS_CHANNEL
+// Optional:
+//   RULES_LINK, FORCE_FETCH_MEMBERS ('true'|'false'), VERIFIED_ROLE_ID,
+//   ROLE_ID_1 ... ROLE_ID_15
 
 const {
   Client,
@@ -11,8 +15,7 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
-  ComponentType,
-  PresenceUpdateStatus,
+  ComponentType
 } = require('discord.js');
 const express = require('express');
 const fs = require('fs');
@@ -20,53 +23,55 @@ const path = require('path');
 
 // ===== Environment =====
 const TOKEN         = process.env.DISCORD_TOKEN;
-const LOG_CHANNEL   = process.env.LOG_CHANNEL;
-const STATS_CHANNEL = process.env.STATS_CHANNEL;
-const VERIFIED_ROLE_ID = process.env.VERIFIED_ROLE_ID || '1389578593541165107';
+const LOG_CHANNEL   = process.env.LOG_CHANNEL;   // where join/leave/etc logs go (same channel)
+const STATS_CHANNEL = process.env.STATS_CHANNEL; // region leaderboard channel
 const RULES_LINK    = process.env.RULES_LINK || '';
+const VERIFIED_ROLE_ID = process.env.VERIFIED_ROLE_ID || null;
 const FORCE_FETCH_MEMBERS = (process.env.FORCE_FETCH_MEMBERS || 'false').toLowerCase() === 'true';
-const VERSION = 'v1.8';
 
 if (!TOKEN || !LOG_CHANNEL || !STATS_CHANNEL) {
-  console.error('❌ Missing environment variables. Set DISCORD_TOKEN, LOG_CHANNEL and STATS_CHANNEL.');
+  console.error('❌ Missing env vars. Set DISCORD_TOKEN, LOG_CHANNEL, STATS_CHANNEL.');
   process.exit(1);
 }
 
 // ===== Keepalive (Railway) =====
 const app = express();
 const PORT = process.env.PORT || 3000;
-app.get('/', (_req, res) => res.send(`🟢 BusyPang ${VERSION} is running.`));
+app.get('/', (_req, res) => res.send('🟢 BusyPang is running.'));
 app.listen(PORT, () => console.log(`✅ Web server running on port ${PORT}`));
 
 // ===== Discord Client =====
 const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMembers,     // enable Server Members Intent
+    GatewayIntentBits.GuildMembers,
     GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
     GatewayIntentBits.GuildModeration,
+    GatewayIntentBits.MessageContent,
   ],
 });
 
-// ===== State (in-memory) =====
-const bannedUsers = new Set();               // lifetime ban cache
-const warningsByGuild = new Map();           // Map<guildId, Map<userId, count>>
-const joinMessageMap = new Map();            // Map<guildId:userId, messageId> to auto-edit join embed
+// ===== In-memory State =====
+const bannedUsers = new Set();                 // lifetime ban cache
+const warningsByGuild = new Map();             // Map<guildId, Map<userId, count>>
+const joinMessageByGuild = new Map();          // Map<guildId, Map<userId, messageId>>
 const ADMIN_CMDS = new Set(['warn','ban','pardon','banlist','warnlist','clearwarns','addkeyword','removekeyword','listkeywords']);
+
+const keywordsFile = path.join(__dirname, 'keywords.json');
+if (!fs.existsSync(keywordsFile)) fs.writeFileSync(keywordsFile, JSON.stringify([]));
+const loadKeywords = () => {
+  try { return JSON.parse(fs.readFileSync(keywordsFile, 'utf8') || '[]'); } catch { return []; }
+};
+const saveKeywords = (arr) => fs.writeFileSync(keywordsFile, JSON.stringify(arr, null, 2));
+
 const isAdmin = (interactionOrMember) => {
   try {
-    if (interactionOrMember.memberPermissions) {
-      return interactionOrMember.memberPermissions.has(PermissionsBitField.Flags.Administrator);
-    }
-    if (interactionOrMember.member && interactionOrMember.member.permissions) {
-      return interactionOrMember.member.permissions.has(PermissionsBitField.Flags.Administrator);
-    }
-    return false;
-  } catch { return false; }
+    if (interactionOrMember.memberPermissions) return interactionOrMember.memberPermissions.has(PermissionsBitField.Flags.Administrator);
+    if (interactionOrMember.member && interactionOrMember.member.permissions) return interactionOrMember.member.permissions.has(PermissionsBitField.Flags.Administrator);
+  } catch {}
+  return false;
 };
 
-// ---- helpers ----
 const log = (guild, content) => {
   try {
     const ch = guild.channels.cache.get(LOG_CHANNEL);
@@ -79,8 +84,7 @@ const getGuildWarnings = (gid) => {
   return m;
 };
 
-// ===== Region Roles (from env) =====
-// ROLE_ID_1 ... ROLE_ID_15 should be set in env to the integers you gave
+// ===== REGION ROLES (read from env ROLE_ID_1...ROLE_ID_15) =====
 const REGION_ROLES = {
   [process.env.ROLE_ID_1]: ":house_with_garden: NEGERI SEMBILAN",
   [process.env.ROLE_ID_2]: ":hot_pepper: KELANTAN",
@@ -99,7 +103,7 @@ const REGION_ROLES = {
   [process.env.ROLE_ID_15]: ":globe_with_meridians: OTHERS",
 };
 
-// ===== Time formatting (Malaysia MYT, 12-hour) =====
+// ===== Helpers =====
 function formatMYTTime(date = new Date()) {
   return new Intl.DateTimeFormat('en-GB', {
     timeZone: 'Asia/Kuala_Lumpur',
@@ -109,12 +113,14 @@ function formatMYTTime(date = new Date()) {
   }).format(date);
 }
 
-// ===== Build embeds =====
 function buildRegionEmbed(guild) {
-  const regionData = Object.entries(REGION_ROLES).map(([id, label]) => {
-    const role = guild.roles.cache.get(id);
-    return { label, count: role ? role.members.size : 0 };
-  }).sort((a,b) => b.count - a.count);
+  const regionData = Object.entries(REGION_ROLES)
+    .filter(([id]) => id) // skip undefined envs
+    .map(([id, label]) => {
+      const role = guild.roles.cache.get(id);
+      return { label, count: role ? role.members.size : 0 };
+    })
+    .sort((a,b) => b.count - a.count);
 
   const medals = ["🏆","🥈","🥉"];
   const lines = regionData.map((r,i) => `${medals[i] || `#${i+1}`} **${r.label}** — ${r.count} member(s)`);
@@ -126,94 +132,84 @@ function buildRegionEmbed(guild) {
     .setTimestamp();
 }
 
-function buildMemberEmbed({ guild, user, member, state = 'joined' }) {
-  // state: 'joined' | 'updated' | 'left'
-  const verified = (member && member.roles && member.roles.cache.has(VERIFIED_ROLE_ID)) ? '✅' : '❌';
-  // find region role label
-  let regionLabel = 'None';
-  if (member) {
-    const roleId = Object.keys(REGION_ROLES).find(rid => member.roles.cache.has(rid));
-    if (roleId) regionLabel = REGION_ROLES[roleId];
-  }
-  const createdAt = formatMYTTime(user.createdAt);
-  const joinedAt = member && member.joinedAt ? formatMYTTime(member.joinedAt) : 'N/A';
-
-  const eb = new EmbedBuilder()
-    .setTitle(state === 'left' ? '👋 Member Left' : '👋 Member Joined / Updated')
-    .setThumbnail(user.displayAvatarURL({ extension: 'png', size: 256 }))
-    .addFields(
-      { name: 'User Details', value: `${user.username}#${user.discriminator} (<@${user.id}>)`, inline: false },
-      { name: 'User ID', value: `${user.id}`, inline: true },
-      { name: 'Account Created', value: `${createdAt}`, inline: true },
-      { name: 'Joined Server', value: `${joinedAt}`, inline: true },
-      { name: 'Region Role', value: `${regionLabel}`, inline: true },
-      { name: 'Verified', value: `${verified}`, inline: true },
-    )
-    .setColor(state === 'left' ? 0xE53935 : 0x00b3ff)
-    .setFooter({ text: `User ${state} • ${formatMYTTime(new Date())}` })
-    .setTimestamp();
-
-  if (state === 'left') {
-    eb.setDescription(`User <@${user.id}> has left the server and will be added to lifetime ban list.`);
-  } else {
-    eb.setDescription(`Welcome <@${user.id}> — Sharing is caring 💙`);
-  }
-  return eb;
-}
-
-// ===== Update region stats message in STATS_CHANNEL =====
 async function updateRegionStats(guild) {
   try {
     if (FORCE_FETCH_MEMBERS) {
-      // only enable if you need accurate counts on huge servers (this will fetch all members)
-      await guild.members.fetch().catch(() => {});
+      await guild.members.fetch().catch(()=>{});
     }
     const channel = guild.channels.cache.get(STATS_CHANNEL);
     if (!channel) return;
     const embed = buildRegionEmbed(guild);
-    const messages = await channel.messages.fetch({ limit: 10 }).catch(() => new Map());
-    const botMsg = Array.isArray(messages) ? null : Array.from(messages.values()).find(m => m.author && m.author.id === client.user.id);
+    const messages = await channel.messages.fetch({ limit: 10 }).catch(()=>[]);
+    const botMsg = messages.find(m => m.author && m.author.id === client.user.id);
     if (botMsg) {
-      await botMsg.edit({ embeds: [embed] }).catch(() => {});
+      await botMsg.edit({ embeds: [embed] }).catch(()=>{});
     } else {
-      await channel.send({ embeds: [embed] }).catch(() => {});
+      await channel.send({ embeds: [embed] }).catch(()=>{});
     }
-  } catch (err) {
-    console.error('Failed to updateRegionStats:', err);
+  } catch (e) {
+    console.error('updateRegionStats error', e);
   }
 }
 
-// ===== Keyword moderation (file-based) =====
-const keywordsFile = path.join(__dirname, 'keywords.json');
-if (!fs.existsSync(keywordsFile)) fs.writeFileSync(keywordsFile, JSON.stringify([], null, 2));
-const loadKeywords = () => {
-  try { return JSON.parse(fs.readFileSync(keywordsFile, 'utf8') || '[]'); } catch { return []; }
-};
-const saveKeywords = (arr) => fs.writeFileSync(keywordsFile, JSON.stringify(arr, null, 2));
+// ===== Join/Update/Leave Embeds handling =====
+function ensureJoinMap(guildId) {
+  let m = joinMessageByGuild.get(guildId);
+  if (!m) { m = new Map(); joinMessageByGuild.set(guildId, m); }
+  return m;
+}
 
+function buildMemberCardEmbed(member, state = 'Joined') {
+  // member: GuildMember
+  const user = member.user;
+  const created = formatMYTTime(user.createdAt);
+  const joined = member.joinedAt ? formatMYTTime(member.joinedAt) : '—';
+  // find region role label
+  const regionRoleId = Object.keys(REGION_ROLES).find(rid => rid && member.roles.cache.has(rid));
+  const regionLabel = regionRoleId ? REGION_ROLES[regionRoleId] : 'None';
+  const verified = VERIFIED_ROLE_ID && member.roles.cache.has(VERIFIED_ROLE_ID) ? '✅' : '❌';
+
+  const emb = new EmbedBuilder()
+    .setTitle(`${state} • ${user.username}`)
+    .setColor(state === 'Left' ? 0xff4d4f : 0x00b3ff)
+    .setThumbnail(user.displayAvatarURL({ size: 1024 }))
+    .addFields(
+      { name: 'User', value: `${user.tag}`, inline: true },
+      { name: 'User ID', value: `${user.id}`, inline: true },
+      { name: 'Account Created', value: `${created}`, inline: false },
+      { name: 'Joined Server', value: `${joined}`, inline: true },
+      { name: 'Region Role', value: `${regionLabel}`, inline: true },
+      { name: 'Verified', value: `${verified}`, inline: true },
+    )
+    .setFooter({ text: `${state} • ${formatMYTTime(new Date())}` })
+    .setTimestamp();
+  return emb;
+}
+
+// ===== Keyword Moderation (file-based) =====
 client.on('messageCreate', async (message) => {
   try {
-    if (!message.guild || message.author.bot) return;
+    if (message.author.bot) return;
     const keywords = loadKeywords();
-    if (!keywords || keywords.length === 0) return;
+    if (!keywords.length) return;
     const content = (message.content || '').toLowerCase();
     const found = keywords.find(k => k && content.includes(k.toLowerCase()));
     if (found) {
-      await message.delete().catch(() => {});
-      await message.channel.send({ content: `🚫 <@${message.author.id}>, your message contained a blocked keyword (\`${found}\`).` }).catch(() => {});
-      log(message.guild, `🛡️ Blocked message by <@${message.author.id}> in #${message.channel.name} — matched: \`${found}\``);
+      await message.delete().catch(()=>{});
+      await message.channel.send({ content: `🚫 <@${message.author.id}>, your message contained a blocked keyword (\`${found}\`).` }).catch(()=>{});
+      if (message.guild) log(message.guild, `🛡️ Blocked message by <@${message.author.id}> in #${message.channel.name} — matched keyword: \`${found}\``);
     }
   } catch (e) {
-    console.error('messageCreate handler error', e);
+    console.error('messageCreate error', e);
   }
 });
 
-// ===== Presence randomizer (no .catch on setPresence) =====
+// ===== Presence randomizer (fixed) =====
 function setRandomPresence() {
   const activities = [
-    { type: 0, name: 'I am BusyBot | /bb' },      // Playing
-    { type: 3, name: "you'all 👀" },              // Watching
-    { type: 2, name: '/commands 🎶' },            // Listening
+    { type: 0, name: 'I am BusyBot | /bb' }, // Playing
+    { type: 3, name: "you'all 👀" },         // Watching
+    { type: 2, name: '/commands 🎶' },       // Listening
   ];
   const a = activities[Math.floor(Math.random() * activities.length)];
   try {
@@ -223,14 +219,14 @@ function setRandomPresence() {
   }
 }
 
-// ===== Boot / Sync bans & region stats =====
+// ===== Boot / Sync on startup =====
 client.once('ready', async () => {
-  console.log(`✅ Logged in as ${client.user.tag} — ${VERSION}`);
+  console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // Sync bans for each guild
+  // sync bans for all guilds on startup
   for (const [, guild] of client.guilds.cache) {
     try {
-      const bans = await guild.bans.fetch().catch(() => new Map());
+      const bans = await guild.bans.fetch().catch(()=>new Map());
       for (const [id] of bans) bannedUsers.add(id);
       console.log(`🔄 Synced ${bans.size || 0} bans for ${guild.name}`);
     } catch (e) {
@@ -238,94 +234,106 @@ client.once('ready', async () => {
     }
   }
 
-  // Presence
+  // presence
   setRandomPresence();
   setInterval(setRandomPresence, 10 * 60 * 1000);
 
-  // Region stats initial + interval for first guild
-  const guild = client.guilds.cache.first();
-  if (guild) {
-    await updateRegionStats(guild);
-    setInterval(() => updateRegionStats(guild), 5 * 60 * 1000);
+  // initial region stats + periodic update
+  for (const [, guild] of client.guilds.cache) {
+    try {
+      await updateRegionStats(guild);
+    } catch {}
   }
+  setInterval(() => {
+    for (const [, guild] of client.guilds.cache) updateRegionStats(guild);
+  }, 5 * 60 * 1000);
 });
 
-// ===== Keep ban cache updated =====
+// keep ban cache in sync
 client.on('guildBanAdd', (ban) => bannedUsers.add(ban.user.id));
 client.on('guildBanRemove', (ban) => bannedUsers.delete(ban.user.id));
 
-// ===== Auto-ban on leave & send join embed =====
+// ===== Member join / leave / update handling =====
 client.on('guildMemberAdd', async (member) => {
   try {
-    const guild = member.guild;
-    // update region stats
-    await updateRegionStats(guild);
-    log(guild, `👋 ${member.user.tag} joined.`);
+    // if user is in lifetime ban cache -> ban immediately
+    if (bannedUsers.has(member.id)) {
+      try {
+        await member.guild.members.ban(member.id, { reason: 'Rejoined after lifetime ban' });
+        log(member.guild, `🚫 **${member.user.tag}** tried to rejoin and was re-banned.`);
+      } catch (e) {
+        log(member.guild, `⚠️ Could not ban ${member.user.tag} on rejoin — check role/permissions.`);
+      }
+      return;
+    }
+
+    // send join embed and store message id for later edit
+    const embed = buildMemberCardEmbed(member, 'Joined');
+    const ch = member.guild.channels.cache.get(LOG_CHANNEL);
+    if (!ch) return;
+    const msg = await ch.send({ embeds: [embed] }).catch(()=>null);
+    if (msg) {
+      const map = ensureJoinMap(member.guild.id);
+      map.set(member.id, msg.id);
+    }
+    log(member.guild, `👋 ${member.user.tag} joined.`);
+    // region stats update
+    updateRegionStats(member.guild).catch(()=>{});
   } catch (e) {
     console.error('guildMemberAdd error', e);
   }
-    // send join embed (store message id so we can update later)
-    const eb = buildMemberEmbed({ guild, user: member.user, member, state: 'joined' });
-    const ch = guild.channels.cache.get(LOG_CHANNEL);
-    if (ch) {
-      const msg = await ch.send({ embeds: [eb] }).catch(() => null);
-      if (msg) joinMessageMap.set(`${guild.id}:${member.id}`, msg.id);
+});
+
+client.on('guildMemberUpdate', async (oldMember, newMember) => {
+  try {
+    // edit the previous join message if present
+    const map = ensureJoinMap(newMember.guild.id);
+    const msgId = map.get(newMember.id);
+    if (msgId) {
+      const ch = newMember.guild.channels.cache.get(LOG_CHANNEL);
+      if (ch) {
+        try {
+          const msg = await ch.messages.fetch(msgId).catch(()=>null);
+          if (msg) {
+            const editedEmbed = buildMemberCardEmbed(newMember, 'Updated');
+            await msg.edit({ embeds: [editedEmbed] }).catch(()=>{});
+          }
+        } catch {}
+      }
     }
+    // If region roles changed, update leaderboard
+    const regionRoleIds = Object.keys(REGION_ROLES).filter(Boolean);
+    const changed = regionRoleIds.some(rid => oldMember.roles.cache.has(rid) !== newMember.roles.cache.has(rid));
+    if (changed) await updateRegionStats(newMember.guild);
+  } catch (e) {
+    console.error('guildMemberUpdate error', e);
+  }
 });
 
 client.on('guildMemberRemove', async (member) => {
   try {
-    const guild = member.guild;
-    // add to lifetime ban cache and attempt to ban by ID (best-effort — user already left)
+    // add to lifetime ban cache and attempt ban-by-id
     bannedUsers.add(member.id);
     try {
-      await guild.members.ban(member.id, { reason: 'Left the server (lifetime ban)' });
-      log(guild, `🚫 ${member.user.tag} left and was banned (lifetime).`);
+      await member.guild.members.ban(member.id, { reason: 'Left the server (lifetime ban)' });
     } catch (e) {
-      log(guild, `⚠️ Could not ban ${member.user.tag} after they left. (${e?.message || e})`);
+      // ban by id may still succeed; log if failed
+      log(member.guild, `⚠️ Could not auto-ban ${member.user.tag} after leaving — check role/permissions.`);
     }
 
-    // send leave embed
-    const ch = guild.channels.cache.get(LOG_CHANNEL);
-    if (ch) {
-      const eb = buildMemberEmbed({ guild, user: member.user, member: null, state: 'left' });
-      await ch.send({ embeds: [eb] }).catch(() => {});
-    }
-    // update region stats
-    await updateRegionStats(guild);
+    // send leave embed (new message)
+    const embed = buildMemberCardEmbed(member, 'Left');
+    const ch = member.guild.channels.cache.get(LOG_CHANNEL);
+    if (ch) await ch.send({ embeds: [embed] }).catch(()=>{});
+
+    // remove stored join message id
+    const map = ensureJoinMap(member.guild.id);
+    map.delete(member.id);
+
+    log(member.guild, `❌ ${member.user.tag} left and was added to lifetime ban list.`);
+    updateRegionStats(member.guild).catch(()=>{});
   } catch (e) {
     console.error('guildMemberRemove error', e);
-  }
-});
-
-// ===== Member updates (auto edit join embed + region change) =====
-client.on('guildMemberUpdate', async (oldMember, newMember) => {
-  try {
-    const guild = newMember.guild;
-    // 1) If roles changed and join message exists -> edit it to "Updated" state
-    const key = `${guild.id}:${newMember.id}`;
-    const msgId = joinMessageMap.get(key);
-    if (msgId) {
-      try {
-        const ch = guild.channels.cache.get(LOG_CHANNEL);
-        if (ch) {
-          const msg = await ch.messages.fetch(msgId).catch(() => null);
-          if (msg) {
-            const eb = buildMemberEmbed({ guild, user: newMember.user, member: newMember, state: 'updated' });
-            await msg.edit({ embeds: [eb] }).catch(() => {});
-          }
-        }
-      } catch (e) { /* ignore */ }
-    }
-
-    // 2) If region roles changed -> update region stats
-    const regionRoleIds = Object.keys(REGION_ROLES).filter(Boolean);
-    const changed = regionRoleIds.some(rid => oldMember.roles.cache.has(rid) !== newMember.roles.cache.has(rid));
-    if (changed) {
-      await updateRegionStats(guild);
-    }
-  } catch (e) {
-    console.error('guildMemberUpdate error', e);
   }
 });
 
@@ -336,45 +344,37 @@ client.on('interactionCreate', async (interaction) => {
     const { commandName: cmd, guild } = interaction;
     if (!guild) return interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
 
-    // keyword commands available only to Admin
-    if (['addkeyword','removekeyword','listkeywords'].includes(cmd) && !isAdmin(interaction)) {
-      return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
-    }
-
-    // admin guard for other admin commands
-    if (ADMIN_CMDS.has(cmd) && !isAdmin(interaction)) {
-      return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
-    }
-
-    // --- Keywords ---
+    // keyword admin commands
     if (cmd === 'addkeyword') {
-      const word = (interaction.options.getString('word') || '').trim().toLowerCase();
-      if (!word) return interaction.reply({ content: 'Provide a keyword.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      const word = interaction.options.getString('word').toLowerCase();
       const arr = loadKeywords();
       if (arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` already exists.`, ephemeral: true });
       arr.push(word); saveKeywords(arr);
       return interaction.reply({ content: `✅ Added keyword: \`${word}\``, ephemeral: true });
     }
     if (cmd === 'removekeyword') {
-      const word = (interaction.options.getString('word') || '').trim().toLowerCase();
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      const word = interaction.options.getString('word').toLowerCase();
       let arr = loadKeywords();
       if (!arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` not found.`, ephemeral: true });
       arr = arr.filter(x => x !== word); saveKeywords(arr);
       return interaction.reply({ content: `✅ Removed keyword: \`${word}\``, ephemeral: true });
     }
     if (cmd === 'listkeywords') {
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
       const arr = loadKeywords();
       if (!arr.length) return interaction.reply({ content: `🚫 No blocked keywords.`, ephemeral: true });
       return interaction.reply({ content: `🛡️ Blocked keywords:\n\`\`\`${arr.join(', ')}\`\`\``, ephemeral: true });
     }
 
-    // --- public: regions ---
+    // public: regions
     if (cmd === 'regions') {
       const embed = buildRegionEmbed(guild);
       return interaction.reply({ embeds: [embed] });
     }
 
-    // --- help / bb ---
+    // help / bb
     if (cmd === 'bb') {
       const emb = new EmbedBuilder()
         .setTitle('🤖 BusyPang — Help & Commands')
@@ -389,7 +389,7 @@ client.on('interactionCreate', async (interaction) => {
           '`/warn @member [reason]` — Add warning (3 = auto-ban)',
           '`/clearwarns @member` — Reset warnings',
           '`/ban @member [reason]` — Ban immediately',
-          '`/pardon user_id` — Unban by ID & reset warnings',
+          '`/pardon user_id` — Unban by ID',
           '`/banlist` — Show ban list',
           '`/warnlist` — Show warning list',
           '',
@@ -401,7 +401,7 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ embeds: [emb] });
     }
 
-    // --- warnings ---
+    // warnings (anyone can check)
     if (cmd === 'warnings') {
       const target = interaction.options.getUser('member') || interaction.user;
       const warnMap = getGuildWarnings(guild.id);
@@ -409,8 +409,9 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `🧾 **${target.tag}** has **${count}/3** warnings.` });
     }
 
-    // --- warn (admin) ---
+    // warn (admin)
     if (cmd === 'warn') {
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
       const user = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
       const warnMap = getGuildWarnings(guild.id);
@@ -431,7 +432,7 @@ client.on('interactionCreate', async (interaction) => {
           .setFooter({ text: RULES_LINK ? 'Please review the server rules.' : '' })
           .setTimestamp();
         if (RULES_LINK) dm.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
-        await user.send({ embeds: [dm] }).catch(() => {});
+        await user.send({ embeds: [dm] }).catch(()=>{});
       } catch {}
 
       await interaction.reply({ content: `⚠️ Warned **${user.tag}** — now at **${next}/3**. 📝 ${reason}` });
@@ -442,22 +443,19 @@ client.on('interactionCreate', async (interaction) => {
         bannedUsers.add(user.id);
         try {
           await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (by ${interaction.user.tag})` });
-          // DM about ban
-          try {
-            const banDM = new EmbedBuilder()
-              .setTitle('🚫 You have been banned')
-              .setDescription(`You have been **banned** from **${guild.name}**.`)
-              .addFields(
-                { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
-                { name: 'Reason', value: `3 warnings — last: ${reason}`, inline: false },
-                { name: 'Type', value: 'Lifetime ban', inline: true },
-              )
-              .setTimestamp();
-            if (RULES_LINK) banDM.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
-            await user.send({ embeds: [banDM] }).catch(() => {});
-          } catch {}
-          await interaction.followUp({ content: `🚫 **${user.tag}** reached 3/3 warnings and was banned for life.` });
+          const banDM = new EmbedBuilder()
+            .setTitle('🚫 You have been banned')
+            .setDescription(`You have been **banned** from **${guild.name}**.`)
+            .addFields(
+              { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
+              { name: 'Reason', value: `3 warnings — last: ${reason}`, inline: false },
+              { name: 'Type', value: 'Lifetime ban', inline: true },
+            )
+            .setTimestamp();
+          if (RULES_LINK) banDM.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
+          await user.send({ embeds: [banDM] }).catch(()=>{});
           log(guild, `🚫 Auto-banned ${user.tag} at 3 warnings (by ${interaction.user.tag}).`);
+          await interaction.followUp({ content: `🚫 **${user.tag}** reached 3/3 warnings and was banned for life.` });
         } catch (e) {
           console.error('Auto-ban error', e);
           await interaction.followUp({ content: `⚠️ Reached 3 warnings but could not ban ${user.tag}. Check my role/permissions.` });
@@ -469,9 +467,9 @@ client.on('interactionCreate', async (interaction) => {
 
     // clearwarns (admin)
     if (cmd === 'clearwarns') {
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
       const user = interaction.options.getUser('member');
-      const warnMap = getGuildWarnings(guild.id);
-      warnMap.set(user.id, 0);
+      getGuildWarnings(guild.id).set(user.id, 0);
       await interaction.reply({ content: `🧹 Cleared warnings for **${user.tag}**.` });
       log(guild, `🧹 ${interaction.user.tag} cleared warnings for ${user.tag}.`);
       return;
@@ -479,25 +477,23 @@ client.on('interactionCreate', async (interaction) => {
 
     // ban (admin)
     if (cmd === 'ban') {
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
       const user = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
       bannedUsers.add(user.id);
       try {
         await guild.members.ban(user.id, { reason });
-        // DM to user
-        try {
-          const banDM = new EmbedBuilder()
-            .setTitle('🚫 You have been banned')
-            .setDescription(`You have been **banned** from **${guild.name}**.`)
-            .addFields(
-              { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
-              { name: 'Reason', value: reason, inline: false },
-              { name: 'Type', value: 'Lifetime ban', inline: true },
-            )
-            .setTimestamp();
-          if (RULES_LINK) banDM.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
-          await user.send({ embeds: [banDM] }).catch(() => {});
-        } catch {}
+        const banDM = new EmbedBuilder()
+          .setTitle('🚫 You have been banned')
+          .setDescription(`You have been **banned** from **${guild.name}**.`)
+          .addFields(
+            { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
+            { name: 'Reason', value: reason, inline: false },
+            { name: 'Type', value: 'Lifetime ban', inline: true },
+          )
+          .setTimestamp();
+        if (RULES_LINK) banDM.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
+        await user.send({ embeds: [banDM] }).catch(()=>{});
         await interaction.reply({ content: `🚫 Banned **${user.tag}**. 📝 ${reason}` });
         log(guild, `🚫 ${interaction.user.tag} banned ${user.tag} — ${reason}`);
       } catch (e) {
@@ -507,15 +503,15 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // pardon (admin) — unban by user ID (works even if user not in server)
+    // pardon (admin) — unban by user ID
     if (cmd === 'pardon') {
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
       const userId = interaction.options.getString('user_id');
       const reason = interaction.options.getString('reason') || `Pardon by ${interaction.user.tag}`;
       bannedUsers.delete(userId);
       getGuildWarnings(guild.id).set(userId, 0);
       try {
         await guild.bans.remove(userId, reason);
-        // try fetch tag
         let tag = userId;
         try { const u = await client.users.fetch(userId); tag = u.tag || userId; } catch {}
         await interaction.reply({ content: `✅ Pardoned **<@${userId}>** (${tag}). 📝 ${reason}` });
@@ -529,33 +525,28 @@ client.on('interactionCreate', async (interaction) => {
 
     // banlist (admin)
     if (cmd === 'banlist') {
-      const bans = await guild.bans.fetch();
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      const bans = await guild.bans.fetch().catch(()=>new Map());
       const lines = [];
-      for (const [id, b] of bans) {
-        lines.push(`• **${b.user.tag}** (<@${id}>)`);
-      }
-      const embed = new EmbedBuilder()
-        .setTitle('📕 Lifetime Ban List')
-        .setDescription(lines.join('\n') || '_No bans._')
-        .setColor(0xff0000);
-      return interaction.reply({ embeds: [embed] });
+      for (const [id, b] of bans) lines.push(`• **${b.user.tag}** (<@${id}>)`);
+      const text = lines.join('\n') || '_No bans._';
+      // trim to allowed length
+      return interaction.reply({ content: `📕 Lifetime Ban List\n\n${text.slice(0,1900)}` });
     }
 
     // warnlist (admin)
     if (cmd === 'warnlist') {
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
       const warnMap = getGuildWarnings(guild.id);
-      const entries = [...warnMap.entries()].filter(([,c]) => c > 0);
+      const entries = [...warnMap.entries()].filter(([,c])=>c>0);
       const lines = [];
-      for (const [id, count] of entries) {
+      for (const [id,count] of entries) {
         let tag = id;
         try { const u = await client.users.fetch(id); tag = u.tag; } catch {}
         lines.push(`• **${tag}** — ${count}/3 (<@${id}>)`);
       }
-      const embed = new EmbedBuilder()
-        .setTitle('🧾 Warning List')
-        .setDescription(lines.join('\n') || '_No warnings._')
-        .setColor(0xffc107);
-      return interaction.reply({ embeds: [embed] });
+      const text = lines.join('\n') || '_No warnings._';
+      return interaction.reply({ content: `🧾 Warning List\n\n${text.slice(0,1900)}` });
     }
 
   } catch (err) {
@@ -564,13 +555,13 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
-// ===== safety logs =====
+// ===== Safety listeners =====
 client.on('error', console.error);
 client.on('shardError', console.error);
 process.on('unhandledRejection', console.error);
 process.on('uncaughtException', console.error);
 
-// ===== start bot =====
+// ===== Start =====
 client.login(TOKEN).catch(err => {
   console.error('Failed to login:', err);
   process.exit(1);
