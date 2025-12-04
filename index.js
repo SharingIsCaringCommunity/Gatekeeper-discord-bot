@@ -295,7 +295,7 @@ client.on('guildMemberUpdate', async (oldMember, newMember) => {
         try {
           const msg = await ch.messages.fetch(msgId).catch(()=>null);
           if (msg) {
-            const editedEmbed = buildMemberCardEmbed(newMember, 'Updated');
+            const editedEmbed = buildMemberCardEmbed(newMember, 'Joined & Updated');
             await msg.edit({ embeds: [editedEmbed] }).catch(()=>{});
           }
         } catch {}
