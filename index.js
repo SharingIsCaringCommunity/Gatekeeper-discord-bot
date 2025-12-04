@@ -2,6 +2,7 @@
 // BusyPang / Gatekeeper Bot — Moderation + Region Leaderboard + Keyword Blocker
 // Version v1.8 (final)
 
+
 const {
   Client,
   GatewayIntentBits,
@@ -141,7 +142,7 @@ function buildMemberEmbed({ guild, user, member, state = 'joined' }) {
     .setTitle(state === 'left' ? '👋 Member Left' : '👋 Member Joined / Updated')
     .setThumbnail(user.displayAvatarURL({ extension: 'png', size: 256 }))
     .addFields(
-      { name: 'User', value: `${user.username}#${user.discriminator} (<@${user.id}>)`, inline: false },
+      { name: 'User Details', value: `${user.username}#${user.discriminator} (<@${user.id}>)`, inline: false },
       { name: 'User ID', value: `${user.id}`, inline: true },
       { name: 'Account Created', value: `${createdAt}`, inline: true },
       { name: 'Joined Server', value: `${joinedAt}`, inline: true },
@@ -155,7 +156,7 @@ function buildMemberEmbed({ guild, user, member, state = 'joined' }) {
   if (state === 'left') {
     eb.setDescription(`User <@${user.id}> has left the server and will be added to lifetime ban list.`);
   } else {
-    eb.setDescription(`Welcome <@${user.id}> — please choose your region role if you haven't yet.`);
+    eb.setDescription(`Welcome <@${user.id}> — Sharing is caring 💙`);
   }
   return eb;
 }
@@ -257,6 +258,12 @@ client.on('guildBanRemove', (ban) => bannedUsers.delete(ban.user.id));
 client.on('guildMemberAdd', async (member) => {
   try {
     const guild = member.guild;
+    // update region stats
+    await updateRegionStats(guild);
+    log(guild, `👋 ${member.user.tag} joined.`);
+  } catch (e) {
+    console.error('guildMemberAdd error', e);
+  }
     // send join embed (store message id so we can update later)
     const eb = buildMemberEmbed({ guild, user: member.user, member, state: 'joined' });
     const ch = guild.channels.cache.get(LOG_CHANNEL);
@@ -264,12 +271,6 @@ client.on('guildMemberAdd', async (member) => {
       const msg = await ch.send({ embeds: [eb] }).catch(() => null);
       if (msg) joinMessageMap.set(`${guild.id}:${member.id}`, msg.id);
     }
-    // update region stats
-    await updateRegionStats(guild);
-    log(guild, `👋 ${member.user.tag} joined.`);
-  } catch (e) {
-    console.error('guildMemberAdd error', e);
-  }
 });
 
 client.on('guildMemberRemove', async (member) => {
