@@ -48,7 +48,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildModeration,
     GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildVoiceStates,
+    GatewayIntentBits.GuildVoiceStates, // important for VC tracking
   ],
 });
 
@@ -338,35 +338,35 @@ client.on('guildMemberRemove', async (member) => {
   }
 });
 
-// ===== Slash command handler =====
+// ===== Slash command handler (warnings / bans / regions / keywords) =====
 client.on('interactionCreate', async (interaction) => {
   try {
     if (!interaction.isChatInputCommand()) return;
     const { commandName: cmd, guild } = interaction;
-    if (!guild) return interaction.reply({ content: 'This command must be used in a server.', ephemeral: true });
+    if (!guild) return interaction.reply({ content: 'This command must be used in a server.' });
 
     // keyword admin commands
     if (cmd === 'addkeyword') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const word = interaction.options.getString('word').toLowerCase();
       const arr = loadKeywords();
-      if (arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` already exists.`, ephemeral: true });
+      if (arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` already exists.` });
       arr.push(word); saveKeywords(arr);
-      return interaction.reply({ content: `✅ Added keyword: \`${word}\``, ephemeral: true });
+      return interaction.reply({ content: `✅ Added keyword: \`${word}\`` });
     }
     if (cmd === 'removekeyword') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const word = interaction.options.getString('word').toLowerCase();
       let arr = loadKeywords();
-      if (!arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` not found.`, ephemeral: true });
+      if (!arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` not found.` });
       arr = arr.filter(x => x !== word); saveKeywords(arr);
-      return interaction.reply({ content: `✅ Removed keyword: \`${word}\``, ephemeral: true });
+      return interaction.reply({ content: `✅ Removed keyword: \`${word}\`` });
     }
     if (cmd === 'listkeywords') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const arr = loadKeywords();
-      if (!arr.length) return interaction.reply({ content: `🚫 No blocked keywords.`, ephemeral: true });
-      return interaction.reply({ content: `🛡️ Blocked keywords:\n\`\`\`${arr.join(', ')}\`\`\``, ephemeral: true });
+      if (!arr.length) return interaction.reply({ content: `🚫 No blocked keywords.` });
+      return interaction.reply({ content: `🛡️ Blocked keywords:\n\`\`\`${arr.join(', ')}\`\`\`` });
     }
 
     // public: regions
@@ -377,7 +377,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // help / bb
     if (cmd === 'bb') {
-      const emb = new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle('🤖 BusyPang — Help & Commands')
         .setColor(0x00b3ff)
         .setDescription([
@@ -399,7 +399,7 @@ client.on('interactionCreate', async (interaction) => {
           '`/removekeyword word` — Remove blocked word',
           '`/listkeywords` — Show all keywords',
         ].join('\n'));
-      return interaction.reply({ embeds: [emb] });
+      return interaction.reply({ embeds: [embed] });
     }
 
     // warnings (anyone can check)
@@ -412,7 +412,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // warn (admin)
     if (cmd === 'warn') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const user = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
       const warnMap = getGuildWarnings(guild.id);
@@ -468,7 +468,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // clearwarns (admin)
     if (cmd === 'clearwarns') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const user = interaction.options.getUser('member');
       getGuildWarnings(guild.id).set(user.id, 0);
       await interaction.reply({ content: `🧹 Cleared warnings for **${user.tag}**.` });
@@ -478,7 +478,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // ban (admin)
     if (cmd === 'ban') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const user = interaction.options.getUser('member');
       const reason = interaction.options.getString('reason') || `Manual ban by ${interaction.user.tag}`;
       bannedUsers.add(user.id);
@@ -506,7 +506,7 @@ client.on('interactionCreate', async (interaction) => {
 
     // pardon (admin) — unban by user ID
     if (cmd === 'pardon') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const userId = interaction.options.getString('user_id');
       const reason = interaction.options.getString('reason') || `Pardon by ${interaction.user.tag}`;
       bannedUsers.delete(userId);
@@ -526,18 +526,17 @@ client.on('interactionCreate', async (interaction) => {
 
     // banlist (admin)
     if (cmd === 'banlist') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const bans = await guild.bans.fetch().catch(()=>new Map());
       const lines = [];
       for (const [id, b] of bans) lines.push(`• **${b.user.tag}** (<@${id}>)`);
       const text = lines.join('\n') || '_No bans._';
-      // trim to allowed length
       return interaction.reply({ content: `📕 Lifetime Ban List\n\n${text.slice(0,1900)}` });
     }
 
     // warnlist (admin)
     if (cmd === 'warnlist') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.', ephemeral: true });
+      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
       const warnMap = getGuildWarnings(guild.id);
       const entries = [...warnMap.entries()].filter(([,c])=>c>0);
       const lines = [];
@@ -552,7 +551,7 @@ client.on('interactionCreate', async (interaction) => {
 
   } catch (err) {
     console.error('interaction handler error', err);
-    if (!interaction.replied) interaction.reply({ content: '❌ Unexpected error. Try again later.', ephemeral: true }).catch(()=>{});
+    if (!interaction.replied) interaction.reply({ content: '❌ Unexpected error. Try again later.' }).catch(()=>{});
   }
 });
 
@@ -1020,7 +1019,7 @@ client.on('interactionCreate', async (interaction) => {
       const agg = (vcAggregates[gid] && vcAggregates[gid][user.id]) || { lifetimeMs: 0, weekly: {}, monthly: {} };
       const wkKey = getYearWeek(new Date());
       const moKey = getYearMonth(new Date());
-      const emb = new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle(`📊 VC Stats — ${user.tag}`)
         .addFields(
           { name: 'Lifetime', value: msToHMS(agg.lifetimeMs || 0), inline: true },
@@ -1028,7 +1027,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: `This month (${moKey})`, value: msToHMS((agg.monthly && agg.monthly[moKey]) || 0), inline: true },
         )
         .setTimestamp();
-      return interaction.reply({ embeds: [emb], ephemeral: [emb] });
+      return interaction.reply({ embeds: [embed] });
     }
 
     // /vcleaderboard
@@ -1059,7 +1058,7 @@ client.on('interactionCreate', async (interaction) => {
         return `**${i+1}.** ${tag} — ${msToHMS(it.monthly)}`;
       }));
 
-      const emb = new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle('🏆 Voice Leaderboards')
         .setDescription(`Top members — Weekly (${wkKey}) & Monthly (${moKey})`)
         .addFields(
@@ -1067,7 +1066,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: `Monthly — Top ${moLines.length}`, value: moLines.join('\n') || '_No data_', inline: true },
         )
         .setTimestamp();
-      return interaction.reply({ embeds: [emb] });
+      return interaction.reply({ embeds: [embed] });
     }
 
     // /weekly [member?]
@@ -1077,23 +1076,23 @@ client.on('interactionCreate', async (interaction) => {
       const agg = (vcAggregates[gid] && vcAggregates[gid][target.id]) || { lifetimeMs: 0, weekly: {}, monthly: {} };
       const keys = Object.keys(agg.weekly || {}).sort().slice(-6).reverse();
       const lines = keys.map(k => `${k} — ${msToHMS(agg.weekly[k])}`);
-      const emb = new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle(`📈 Weekly VC Breakdown — ${target.tag}`)
         .setDescription(lines.join('\n') || '_No weekly data_')
         .setTimestamp();
-      return interaction.reply({ embeds: [emb], ephemeral: [emb] });
+      return interaction.reply({ embeds: [embed] });
     }
 
     // /session
     if (cmd === 'session') {
       const member = guild.members.cache.get(user.id);
       const ch = member?.voice?.channel;
-      if (!ch) return interaction.reply({ content: 'You are not in a voice channel.', ephemeral: true });
+      if (!ch) return interaction.reply({ content: 'You are not in a voice channel.' });
 
       const gid = guild.id;
       const cid = ch.id;
       const session = vcActiveSessions?.[gid]?.[cid];
-      if (!session) return interaction.reply({ content: 'No active tracking for this channel yet.', ephemeral: true });
+      if (!session) return interaction.reply({ content: 'No active tracking for this channel yet.' });
 
       const parts = [];
       for (const uid of session.joinedOrder) {
@@ -1104,12 +1103,12 @@ client.on('interactionCreate', async (interaction) => {
         parts.push(`${p.currentJoinTs ? '🔴' : '⚪'} <@${uid}> — ${msToHMS(total)}`);
       }
 
-      const emb = new EmbedBuilder()
+      const embed = new EmbedBuilder()
         .setTitle(`🔔 Live VC Tracking — ${ch.name}`)
         .setDescription(parts.join('\n') || '_No participants tracked_')
         .setFooter({ text: `Session started: ${formatMYTTime(new Date(session.startTs))}` })
         .setTimestamp();
-      return interaction.reply({ embeds: [emb], ephemeral: [emb] });
+      return interaction.reply({ embeds: [embed] });
     }
 
     // /monthly — only after monthly summary has been generated
@@ -1120,7 +1119,6 @@ client.on('interactionCreate', async (interaction) => {
       if (!guildSummaries[key]) {
         return interaction.reply({
           content: '❌ Sorry, this month’s summary is not ready yet. Please check again at the end of the month.',
-          ephemeral: [emb],
         });
       }
       const summary = guildSummaries[key];
@@ -1129,17 +1127,16 @@ client.on('interactionCreate', async (interaction) => {
         return interaction.reply({
           embeds: [embed],
           files: [{ attachment: file.content, name: file.name }],
-          ephemeral: true,
         });
       } else {
-        return interaction.reply({ embeds: [embed], ephemeral: [emb] });
+        return interaction.reply({ embeds: [embed] });
       }
     }
 
   } catch (e) {
     console.error('[VC] interaction handler error', e);
     if (!interaction.replied) {
-      interaction.reply({ content: '❌ VC stats error. Try again later.', ephemeral: [emb] }).catch(()=>{});
+      interaction.reply({ content: '❌ VC stats error. Try again later.' }).catch(()=>{});
     }
   }
 });
