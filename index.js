@@ -48,6 +48,7 @@ const client = new Client({
     GatewayIntentBits.GuildMessages,
     GatewayIntentBits.GuildModeration,
     GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildVoiceStates,
   ],
 });
 
@@ -1027,7 +1028,7 @@ client.on('interactionCreate', async (interaction) => {
           { name: `This month (${moKey})`, value: msToHMS((agg.monthly && agg.monthly[moKey]) || 0), inline: true },
         )
         .setTimestamp();
-      return interaction.reply({ embeds: [emb], ephemeral: true });
+      return interaction.reply({ embeds: [emb], ephemeral: [emb] });
     }
 
     // /vcleaderboard
@@ -1080,7 +1081,7 @@ client.on('interactionCreate', async (interaction) => {
         .setTitle(`📈 Weekly VC Breakdown — ${target.tag}`)
         .setDescription(lines.join('\n') || '_No weekly data_')
         .setTimestamp();
-      return interaction.reply({ embeds: [emb], ephemeral: true });
+      return interaction.reply({ embeds: [emb], ephemeral: [emb] });
     }
 
     // /session
@@ -1108,7 +1109,7 @@ client.on('interactionCreate', async (interaction) => {
         .setDescription(parts.join('\n') || '_No participants tracked_')
         .setFooter({ text: `Session started: ${formatMYTTime(new Date(session.startTs))}` })
         .setTimestamp();
-      return interaction.reply({ embeds: [emb], ephemeral: true });
+      return interaction.reply({ embeds: [emb], ephemeral: [emb] });
     }
 
     // /monthly — only after monthly summary has been generated
@@ -1119,7 +1120,7 @@ client.on('interactionCreate', async (interaction) => {
       if (!guildSummaries[key]) {
         return interaction.reply({
           content: '❌ Sorry, this month’s summary is not ready yet. Please check again at the end of the month.',
-          ephemeral: true,
+          ephemeral: [emb],
         });
       }
       const summary = guildSummaries[key];
@@ -1131,14 +1132,14 @@ client.on('interactionCreate', async (interaction) => {
           ephemeral: true,
         });
       } else {
-        return interaction.reply({ embeds: [embed], ephemeral: true });
+        return interaction.reply({ embeds: [embed], ephemeral: [emb] });
       }
     }
 
   } catch (e) {
     console.error('[VC] interaction handler error', e);
     if (!interaction.replied) {
-      interaction.reply({ content: '❌ VC stats error. Try again later.', ephemeral: true }).catch(()=>{});
+      interaction.reply({ content: '❌ VC stats error. Try again later.', ephemeral: [emb] }).catch(()=>{});
     }
   }
 });
