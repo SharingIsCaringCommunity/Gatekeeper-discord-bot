@@ -634,18 +634,32 @@ function monthRangeForKey(key) {
 }
 
 // ---------- In-memory VC data ----------
-let vcActiveSessions   = safeReadJSON(VC_ACTIVE_FILE,  {}); // { [guildId]: { [channelId]: { startTs, participants, joinedOrder } } }
-let vcLogsArchive      = safeReadJSON(VC_LOGS_FILE,    []); // array of per-session summaries
-let vcAggregates       = safeReadJSON(VC_AGG_FILE,     {}); // { [guildId]: { [userId]: { lifetimeMs, weekly, monthly } } }
-let vcMonthlySummaries = safeReadJSON(VC_MONTHLY_FILE, {}); // { [guildId]: { "YYYY-MM": summaryObj } }
+// vcActiveSessions[gid][cid] = {
+//   startTs,
+//   participants: {
+//     [uid]: {
+//       totalMs,
+//       currentJoinTs,
+//       rejoinCount,
+//       firstJoinTs,
+//       lastLeaveTs
+//     }
+//   },
+//   joinedOrder: [uid, uid, ...] // unique ids, order of first join
+// }
+let vcActiveSessions   = safeReadJSON(VC_ACTIVE_FILE,  {});
+let vcLogsArchive      = safeReadJSON(VC_LOGS_FILE,    []); // per-session logs
+// vcAggregates[gid][uid] = { lifetimeMs, weekly: {wkKey:ms}, monthly: {moKey:ms} }
+let vcAggregates       = safeReadJSON(VC_AGG_FILE,     {});
+let vcMonthlySummaries = safeReadJSON(VC_MONTHLY_FILE, {});
 
 function ensureActiveSession(gid, cid) {
   if (!vcActiveSessions[gid]) vcActiveSessions[gid] = {};
   if (!vcActiveSessions[gid][cid]) {
     vcActiveSessions[gid][cid] = {
       startTs: Date.now(),
-      participants: {}, // userId -> { totalMs, currentJoinTs }
-      joinedOrder: []   // array of userIds in order of first join
+      participants: {},
+      joinedOrder: [],
     };
   }
   return vcActiveSessions[gid][cid];
@@ -655,8 +669,8 @@ function ensureAggregate(gid, uid) {
   if (!vcAggregates[gid][uid]) {
     vcAggregates[gid][uid] = {
       lifetimeMs: 0,
-      weekly: {},   // "YYYY-WW" -> ms
-      monthly: {},  // "YYYY-MM" -> ms
+      weekly: {},
+      monthly: {},
     };
   }
   return vcAggregates[gid][uid];
@@ -674,20 +688,86 @@ process.on('exit',   () => persistAllVC());
 process.on('SIGINT', () => { persistAllVC(); process.exit(); });
 process.on('SIGTERM',() => { persistAllVC(); process.exit(); });
 
+// ---------- Channel helpers ----------
+function getAdminVCLogChannel(guild) {
+  return (
+    guild.channels.cache.get(VC_LOG_CHANNEL_ID) ||
+    guild.channels.cache.get(VC_LOG_CHANNEL_FALLBACK) ||
+    null
+  );
+}
+function getPublicVCStatsChannel(guild) {
+  return (
+    guild.channels.cache.get(VC_STATS_CHANNEL_ID) ||
+    guild.channels.cache.get(VC_STATS_CHANNEL_FALLBACK) ||
+    null
+  );
+}
+async function sendVCAdminLog(guild, embed) {
+  try {
+    const ch = getAdminVCLogChannel(guild);
+    if (!ch) return;
+    await ch.send({ embeds: [embed] }).catch(() => {});
+  } catch (e) {
+    console.error('[VC] admin log send error', e);
+  }
+}
+async function sendVCPublicLog(guild, embed) {
+  try {
+    const ch = getPublicVCStatsChannel(guild);
+    if (!ch) return;
+    await ch.send({ embeds: [embed] }).catch(() => {});
+  } catch (e) {
+    console.error('[VC] public log send error', e);
+  }
+}
+
 // ---------- Core: join / leave handlers ----------
 function handleVCJoin(guild, channel, user) {
   try {
     const gid = guild.id;
     const cid = channel.id;
+    const now = Date.now();
     const session = ensureActiveSession(gid, cid);
-    if (!session.participants[user.id]) {
-      session.participants[user.id] = { totalMs: 0, currentJoinTs: Date.now() };
-      session.joinedOrder.push(user.id);
+
+    let part = session.participants[user.id];
+    const isRejoin = !!part;
+
+    if (!part) {
+      part = {
+        totalMs: 0,
+        currentJoinTs: now,
+        rejoinCount: 0,
+        firstJoinTs: now,
+        lastLeaveTs: null,
+      };
+      session.participants[user.id] = part;
+      if (!session.joinedOrder.includes(user.id)) {
+        session.joinedOrder.push(user.id);
+      }
     } else {
-      session.participants[user.id].currentJoinTs = Date.now();
+      // rejoin same session
+      part.currentJoinTs = now;
+      part.rejoinCount = (part.rejoinCount || 0) + 1;
     }
+
     vcActiveSessions[gid][cid] = session;
     persistAllVC();
+
+    // Admin per-event log: JOIN / REJOIN
+    const joinEmbed = new EmbedBuilder()
+      .setTitle(isRejoin ? '🔁 VC Rejoin' : '✅ VC Join')
+      .setColor(isRejoin ? 0xfee75c : 0x57f287)
+      .setDescription(`<@${user.id}> ${isRejoin ? 'rejoined' : 'joined'} **${channel.name}**`)
+      .addFields(
+        { name: 'User', value: `${user.tag} (${user.id})`, inline: false },
+        { name: 'Channel', value: channel.name, inline: true },
+        { name: 'Time', value: formatMYTTime(new Date(now)), inline: true },
+      )
+      .setTimestamp();
+
+    sendVCAdminLog(guild, joinEmbed);
+
   } catch (e) {
     console.error('[VC] join error', e);
   }
@@ -701,11 +781,17 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
     const session = vcActiveSessions?.[gid]?.[cid];
     if (!session) return;
 
+    const now = Date.now();
     const part = session.participants[user.id];
+    let thisSessionMs = 0;
+
     if (part && part.currentJoinTs) {
-      const delta = Date.now() - part.currentJoinTs;
+      const delta = now - part.currentJoinTs;
       part.totalMs = (part.totalMs || 0) + delta;
       part.currentJoinTs = null;
+      part.lastLeaveTs = now;
+
+      thisSessionMs = part.totalMs || 0;
 
       const agg = ensureAggregate(gid, user.id);
       agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
@@ -717,14 +803,36 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
     }
 
     const ch = oldChannel;
+
+    // Admin per-event log: LEAVE / MOVE-LEAVE
+    if (ch) {
+      const leavingForMove = !!newChannel;
+      const leaveEmbed = new EmbedBuilder()
+        .setTitle(leavingForMove ? '➡️ VC Move (left)' : '❌ VC Leave')
+        .setColor(leavingForMove ? 0x5865f2 : 0xed4245)
+        .setDescription(
+          `<@${user.id}> ${leavingForMove ? 'moved from' : 'left'} **${ch.name}**` +
+          (thisSessionMs ? ` — this session: **${msToHMS(thisSessionMs)}**` : '')
+        )
+        .addFields(
+          { name: 'User', value: `${user.tag} (${user.id})`, inline: false },
+          { name: 'Channel', value: ch.name, inline: true },
+          { name: 'Time', value: formatMYTTime(new Date(now)), inline: true },
+        )
+        .setTimestamp();
+
+      sendVCAdminLog(guild, leaveEmbed);
+    }
+
     // Channel became empty => finalize this VC session
     if (ch && ch.members && ch.members.size === 0) {
-      // Close any still-open participants
+      // Close any still-open participants & aggregate remaining
       for (const [uid, p] of Object.entries(session.participants)) {
         if (p.currentJoinTs) {
-          const delta = Date.now() - p.currentJoinTs;
+          const delta = now - p.currentJoinTs;
           p.totalMs = (p.totalMs || 0) + delta;
           p.currentJoinTs = null;
+          p.lastLeaveTs = now;
 
           const agg = ensureAggregate(gid, uid);
           agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
@@ -738,6 +846,8 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
 
       const start = new Date(session.startTs);
       const end   = new Date();
+
+      // Build members per-session summary
       let totalMs = 0;
       const membersSummary = [];
 
@@ -750,10 +860,28 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
           const u = await client.users.fetch(uid).catch(()=>null);
           if (u && u.tag) tag = u.tag;
         } catch {}
-        membersSummary.push({ uid, tag, ms: p.totalMs || 0 });
+        membersSummary.push({
+          uid,
+          tag,
+          ms: p.totalMs || 0,
+          rejoinCount: p.rejoinCount || 0,
+          firstJoinTs: p.firstJoinTs || session.startTs,
+          lastLeaveTs: p.lastLeaveTs || end.getTime(),
+        });
       }
 
-      // Save one session log entry
+      // Who joined first?
+      let firstJoin = null;
+      for (const m of membersSummary) {
+        if (!firstJoin || m.firstJoinTs < firstJoin.firstJoinTs) {
+          firstJoin = m;
+        }
+      }
+
+      // Who stayed longest?
+      const longest = [...membersSummary].sort((a,b)=>b.ms-a.ms)[0] || null;
+
+      // Save one session log entry (including rejoin counts)
       const summaryObj = {
         guildId: gid,
         channelId: cid,
@@ -766,9 +894,13 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
       };
       vcLogsArchive.push(summaryObj);
 
-      // Build embed
-      const embed = new EmbedBuilder()
-        .setTitle(`🎙️ VC Session Summary — ${ch.name}`)
+      // ---------- ADMIN DETAILED SESSION EMBED ----------
+      const adminLines = membersSummary.map((m, i) => {
+        return `**${i+1}. ${m.tag}** — ${msToHMS(m.ms)} — joins: ${1 + (m.rejoinCount || 0)} (rejoins: ${m.rejoinCount || 0})`;
+      });
+
+      const adminEmbed = new EmbedBuilder()
+        .setTitle(`🎧 VC Session Detailed Log — ${ch.name}`)
         .setDescription([
           `**Channel:** ${ch.name}`,
           `**Session start:** ${formatMYTTime(start)}`,
@@ -776,37 +908,49 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
           `**Total members joined:** ${membersSummary.length}`,
           `**Total voice time (sum):** ${msToHMS(totalMs)}`,
           '',
+          firstJoin ? `**First to join:** ${firstJoin.tag} (${formatMYTTime(new Date(firstJoin.firstJoinTs))})` : '',
+          longest ? `**Longest stay:** ${longest.tag} (${msToHMS(longest.ms)})` : '',
+          '',
           '**Participants:**',
-        ].join('\n'))
-        .setColor(0x5865F2)
+        ].filter(Boolean).join('\n'))
+        .setColor(0x2b2d31)
         .setTimestamp();
 
-      for (const m of membersSummary.slice(0, 25)) {
-        embed.addFields({ name: m.tag, value: msToHMS(m.ms), inline: true });
-      }
-      if (membersSummary.length > 25) {
-        embed.addFields({ name: '…', value: `(${membersSummary.length - 25} more)`, inline: false });
-      }
-
-      // Send to admin VC log channel
-      try {
-        const adminCh =
-          guild.channels.cache.get(VC_LOG_CHANNEL_ID) ||
-          guild.channels.cache.get(VC_LOG_CHANNEL_FALLBACK);
-        if (adminCh) await adminCh.send({ embeds: [embed] }).catch(()=>{});
-      } catch (e) {
-        console.error('[VC] send admin log error', e);
+      if (adminLines.length) {
+        adminEmbed.addFields({
+          name: `Member breakdown (${adminLines.length})`,
+          value: adminLines.join('\n').slice(0, 1024),
+        });
       }
 
-      // Send to public VC stats channel
-      try {
-        const statsCh =
-          guild.channels.cache.get(VC_STATS_CHANNEL_ID) ||
-          guild.channels.cache.get(VC_STATS_CHANNEL_FALLBACK);
-        if (statsCh) await statsCh.send({ embeds: [embed] }).catch(()=>{});
-      } catch (e) {
-        console.error('[VC] send stats error', e);
-      }
+      await sendVCAdminLog(guild, adminEmbed);
+
+      // ---------- PUBLIC FRIENDLY SESSION EMBED ----------
+      const publicTop = [...membersSummary]
+        .sort((a,b)=>b.ms-a.ms)
+        .slice(0, 5);
+
+      const publicLines = publicTop.map((m, i) => {
+        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : '•';
+        return `${medal} ${m.tag} — ${msToHMS(m.ms)}${m.rejoinCount ? ` (rejoins: ${m.rejoinCount})` : ''}`;
+      });
+
+      const totalHours = msToHMS(totalMs);
+
+      const publicEmbed = new EmbedBuilder()
+        .setTitle(`🎙️ VC Session Summary — ${ch.name}`)
+        .setDescription([
+          `**Total participants:** ${membersSummary.length}`,
+          `**Total voice time (sum):** ${totalHours}`,
+          longest ? `**Longest listener:** ${longest.tag} — ${msToHMS(longest.ms)}` : '',
+          '',
+          '**Top listeners this session:**',
+          publicLines.join('\n') || '_No data_',
+        ].filter(Boolean).join('\n'))
+        .setColor(0x5865f2)
+        .setTimestamp();
+
+      await sendVCPublicLog(guild, publicEmbed);
 
       // Clear active session
       delete vcActiveSessions[gid][cid];
@@ -861,15 +1005,16 @@ function buildMonthlySummaryForKey(guildId, key) {
 
   for (const s of sessions) {
     for (const m of s.members || []) {
-      if (!perUser[m.uid]) perUser[m.uid] = { ms: 0, sessions: 0 };
+      if (!perUser[m.uid]) perUser[m.uid] = { ms: 0, sessions: 0, rejoinCount: 0 };
       perUser[m.uid].ms       += (m.ms || 0);
       perUser[m.uid].sessions += 1;
+      perUser[m.uid].rejoinCount += (m.rejoinCount || 0);
       totalMs                 += (m.ms || 0);
     }
   }
 
   const members = Object.entries(perUser)
-    .map(([uid, v]) => ({ uid, ms: v.ms, sessions: v.sessions }))
+    .map(([uid, v]) => ({ uid, ms: v.ms, sessions: v.sessions, rejoinCount: v.rejoinCount }))
     .sort((a, b) => b.ms - a.ms);
 
   return {
@@ -907,7 +1052,7 @@ async function monthlyEmbedFromSummary(guild, summary) {
       const u = await client.users.fetch(m.uid).catch(()=>null);
       if (u && u.tag) tag = u.tag;
     } catch {}
-    lines.push(`${tag} — ${msToHMS(m.ms)} (${m.sessions} sessions)`);
+    lines.push(`${tag} — ${msToHMS(m.ms)} (${m.sessions} sessions, ${m.rejoinCount || 0} rejoins)`);
   }
 
   const fullText = lines.join('\n');
@@ -917,7 +1062,7 @@ async function monthlyEmbedFromSummary(guild, summary) {
   } else {
     const top25 = lines.slice(0, 25).join('\n');
     emb.addFields({ name: 'Top 25 members', value: top25 || '_No data_' });
-    const fileContent = ['Member — Time — Sessions', ...lines].join('\n');
+    const fileContent = ['Member — Time — Sessions — Rejoins', ...lines].join('\n');
     const buffer = Buffer.from(fileContent, 'utf8');
     return {
       embed: emb,
@@ -936,9 +1081,7 @@ async function postAndSaveMonthlySummary(guild, summary) {
 
     // Admin log
     try {
-      const adminCh =
-        guild.channels.cache.get(VC_LOG_CHANNEL_ID) ||
-        guild.channels.cache.get(VC_LOG_CHANNEL_FALLBACK);
+      const adminCh = getAdminVCLogChannel(guild);
       if (adminCh) {
         if (file) {
           await adminCh.send({ embeds: [embed], files: [{ attachment: file.content, name: file.name }] }).catch(()=>{});
@@ -952,9 +1095,7 @@ async function postAndSaveMonthlySummary(guild, summary) {
 
     // Public stats
     try {
-      const statsCh =
-        guild.channels.cache.get(VC_STATS_CHANNEL_ID) ||
-        guild.channels.cache.get(VC_STATS_CHANNEL_FALLBACK);
+      const statsCh = getPublicVCStatsChannel(guild);
       if (statsCh) {
         if (file) {
           await statsCh.send({ embeds: [embed], files: [{ attachment: file.content, name: file.name }] }).catch(()=>{});
@@ -1100,7 +1241,8 @@ client.on('interactionCreate', async (interaction) => {
         if (!p) continue;
         const inNow = p.currentJoinTs ? (Date.now() - p.currentJoinTs) : 0;
         const total = (p.totalMs || 0) + inNow;
-        parts.push(`${p.currentJoinTs ? '🔴' : '⚪'} <@${uid}> — ${msToHMS(total)}`);
+        const joins = 1 + (p.rejoinCount || 0);
+        parts.push(`${p.currentJoinTs ? '🔴' : '⚪'} <@${uid}> — ${msToHMS(total)} (joins: ${joins})`);
       }
 
       const embed = new EmbedBuilder()
