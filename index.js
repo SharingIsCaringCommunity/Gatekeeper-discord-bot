@@ -21,6 +21,232 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 
+// ===== Read all existing ban rows from Google Sheets =====
+// returns a Set of userIds already logged
+async function getExistingBanIdsFromSheet() {
+  try {
+    const sheets = getSheetsClient();
+    if (!sheets) return new Set();
+
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: 'BanList!A2:F', // full table except header
+    });
+
+    const rows = res.data.values || [];
+    const ids = new Set(rows.map(r => r[1])); // column B = userId
+    return ids;
+
+  } catch (e) {
+    console.error('[Sheets] getExistingBanIdsFromSheet error:', e?.message || e);
+    return new Set();
+  }
+}
+
+// ===== Sync bans from Discord to Google Sheet =====
+async function syncExistingBansToSheet(guild) {
+  try {
+    const existing = await getExistingBanIdsFromSheet();
+    const bans = await guild.bans.fetch().catch(() => new Map());
+
+    if (!bans.size) return;
+
+    const rowsToAdd = [];
+
+    for (const [, ban] of bans) {
+      const user = ban.user;
+      if (!user) continue;
+
+      if (existing.has(user.id)) {
+        // Already logged → skip
+        continue;
+      }
+
+      // New ban → push for sheet insert
+      rowsToAdd.push([
+        guild.id,
+        user.id,
+        user.tag,
+        'SYSTEM (startup sync)',
+        ban.reason || 'No reason',
+        'Startup Sync',
+        new Date().toISOString()
+      ]);
+    }
+
+    if (rowsToAdd.length > 0) {
+      await appendSheet('BanList!A2', rowsToAdd);
+      console.log(`📄 Synced ${rowsToAdd.length} new bans → Google Sheets`);
+    } else {
+      console.log('✔ BanSheet already up-to-date — no sync needed.');
+    }
+
+  } catch (e) {
+    console.error('[Sheets] syncExistingBansToSheet error:', e?.message || e);
+  }
+}
+
+const { google } = require('googleapis');
+
+// ===== Google Sheets config =====
+const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || '';
+const GOOGLE_PRIVATE_KEY  = process.env.GOOGLE_PRIVATE_KEY  || '';
+const GOOGLE_SHEET_ID     = process.env.GOOGLE_SHEET_ID     || '';
+
+let sheetsClient = null;
+
+function getSheetsClient() {
+  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !GOOGLE_SHEET_ID) {
+    console.warn('[Sheets] Missing GOOGLE_CLIENT_EMAIL / GOOGLE_PRIVATE_KEY / GOOGLE_SHEET_ID');
+    return null;
+  }
+  if (sheetsClient) return sheetsClient;
+
+  const auth = new google.auth.JWT(
+    GOOGLE_CLIENT_EMAIL,
+    null,
+    GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+    ['https://www.googleapis.com/auth/spreadsheets']
+  );
+
+  sheetsClient = google.sheets({ version: 'v4', auth });
+  return sheetsClient;
+}
+
+async function appendSheet(range, values) {
+  try {
+    const sheets = getSheetsClient();
+    if (!sheets) return;
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range,
+      valueInputOption: 'RAW',
+      requestBody: { values },
+    });
+  } catch (e) {
+    console.error('[Sheets] appendSheet error', e?.message || e);
+  }
+}
+
+// ===== High-level log helpers for each tab =====
+//
+// Keywords sheet: Keywords!A:E
+// Headers: keyword | action | byTag | byId | at
+async function logKeywordChange(action, word, user) {
+  try {
+    await appendSheet('Keywords!A2', [[
+      word,
+      action,
+      user?.tag || 'unknown',
+      user?.id  || 'unknown',
+      new Date().toISOString(),
+    ]]);
+  } catch (e) {
+    console.error('[Sheets] logKeywordChange error', e?.message || e);
+  }
+}
+
+// WarnList sheet: WarnList!A:G
+// Headers: guildId | userId | username | moderator | reason | warningCount | at
+async function logWarnEvent(guild, targetUser, moderatorUser, reason, count) {
+  try {
+    await appendSheet('WarnList!A2', [[
+      guild?.id || 'unknown',
+      targetUser?.id || 'unknown',
+      targetUser?.tag || 'unknown',
+      moderatorUser?.tag || 'unknown',
+      reason || '',
+      String(count ?? ''),
+      new Date().toISOString(),
+    ]]);
+  } catch (e) {
+    console.error('[Sheets] logWarnEvent error', e?.message || e);
+  }
+}
+
+// BanList sheet: BanList!A:G
+// Headers: guildId | userId | username | moderator | reason | banType | at
+async function logBanEvent(guild, targetUser, moderatorUser, reason, type) {
+  try {
+    await appendSheet('BanList!A2', [[
+      guild?.id || 'unknown',
+      targetUser?.id || 'unknown',
+      targetUser?.tag || 'unknown',
+      moderatorUser?.tag || 'unknown',
+      reason || '',
+      type || '',
+      new Date().toISOString(),
+    ]]);
+  } catch (e) {
+    console.error('[Sheets] logBanEvent error', e?.message || e);
+  }
+}
+
+// VC_Sessions & VC_Members
+// VC_Sessions headers: guildId | channelId | channelName | start | end | durationMs | totalMembers | loggedAt
+// VC_Members headers: guildId | channelId | userId | usernameTag | ms | rejoinCount | sessionStart | sessionEnd
+async function saveSessionToGoogleSheets(summaryObj) {
+  try {
+    const sheets = getSheetsClient();
+    if (!sheets) return;
+
+    const {
+      guildId,
+      channelId,
+      channelName,
+      start,
+      end,
+      durationMs,
+      totalMembers,
+      members,
+    } = summaryObj;
+
+    const sessionRow = [
+      guildId,
+      channelId,
+      channelName,
+      start,
+      end,
+      durationMs,
+      totalMembers,
+      new Date().toISOString(), // loggedAt
+    ];
+
+    // 1) Session row
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: 'VC_Sessions!A2',
+      valueInputOption: 'RAW',
+      requestBody: { values: [sessionRow] },
+    });
+
+    // 2) Member rows
+    const memberRows = (members || []).map((m) => [
+      guildId,
+      channelId,
+      m.uid,
+      m.tag,
+      m.ms,
+      m.rejoinCount || 0,
+      start,
+      end,
+    ]);
+
+    if (memberRows.length) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: GOOGLE_SHEET_ID,
+        range: 'VC_Members!A2',
+        valueInputOption: 'RAW',
+        requestBody: { values: memberRows },
+      });
+    }
+
+    console.log('[Sheets] Saved VC session + members to Google Sheets.');
+  } catch (e) {
+    console.error('[Sheets] saveSessionToGoogleSheets error', e?.message || e);
+  }
+}
+
 // ===== Environment =====
 const TOKEN         = process.env.DISCORD_TOKEN;
 const LOG_CHANNEL   = process.env.LOG_CHANNEL;   // where join/leave/etc logs go (same channel)
@@ -224,30 +450,38 @@ function setRandomPresence() {
 client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
 
-  // sync bans for all guilds on startup
+  // Sync bans for all guilds on startup
   for (const [, guild] of client.guilds.cache) {
     try {
-      const bans = await guild.bans.fetch().catch(()=>new Map());
+      const bans = await guild.bans.fetch().catch(() => new Map());
       for (const [id] of bans) bannedUsers.add(id);
-      console.log(`🔄 Synced ${bans.size || 0} bans for ${guild.name}`);
+
+      console.log(`🔄 Discord banslist loaded: ${bans.size} for ${guild.name}`);
+
+      // Sync ONLY missing bans to Sheets
+      await syncExistingBansToSheet(guild);
     } catch (e) {
       console.warn('Failed to sync bans for', guild?.name, e?.message || e);
     }
   }
 
-  // presence
+  // Presence rotation
   setRandomPresence();
   setInterval(setRandomPresence, 10 * 60 * 1000);
 
-  // initial region stats + periodic update
+  // Update region stats initially
   for (const [, guild] of client.guilds.cache) {
-    try {
-      await updateRegionStats(guild);
-    } catch {}
+    await updateRegionStats(guild).catch(()=>{});
   }
-  setInterval(() => {
-    for (const [, guild] of client.guilds.cache) updateRegionStats(guild);
+
+  // Periodic update
+  setInterval(async () => {
+    for (const [, guild] of client.guilds.cache) {
+      await updateRegionStats(guild).catch(()=>{});
+    }
   }, 5 * 60 * 1000);
+
+  console.log("🚀 BusyPang fully started.");
 });
 
 // keep ban cache in sync
@@ -346,28 +580,30 @@ client.on('interactionCreate', async (interaction) => {
     if (!guild) return interaction.reply({ content: 'This command must be used in a server.' });
 
     // keyword admin commands
-    if (cmd === 'addkeyword') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
-      const word = interaction.options.getString('word').toLowerCase();
-      const arr = loadKeywords();
-      if (arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` already exists.` });
-      arr.push(word); saveKeywords(arr);
-      return interaction.reply({ content: `✅ Added keyword: \`${word}\`` });
-    }
-    if (cmd === 'removekeyword') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
-      const word = interaction.options.getString('word').toLowerCase();
-      let arr = loadKeywords();
-      if (!arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` not found.` });
-      arr = arr.filter(x => x !== word); saveKeywords(arr);
-      return interaction.reply({ content: `✅ Removed keyword: \`${word}\`` });
-    }
-    if (cmd === 'listkeywords') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
-      const arr = loadKeywords();
-      if (!arr.length) return interaction.reply({ content: `🚫 No blocked keywords.` });
-      return interaction.reply({ content: `🛡️ Blocked keywords:\n\`\`\`${arr.join(', ')}\`\`\`` });
-    }
+if (cmd === 'addkeyword') {
+  if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
+  const word = interaction.options.getString('word').toLowerCase();
+  const arr = loadKeywords();
+  if (arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` already exists.` });
+  arr.push(word); saveKeywords(arr);
+
+  // 🔹 Log to Google Sheets
+  logKeywordChange('ADD', word, interaction.user).catch(()=>{});
+
+  return interaction.reply({ content: `✅ Added keyword: \`${word}\`` });
+}
+if (cmd === 'removekeyword') {
+  if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
+  const word = interaction.options.getString('word').toLowerCase();
+  let arr = loadKeywords();
+  if (!arr.includes(word)) return interaction.reply({ content: `⚠️ Keyword \`${word}\` not found.` });
+  arr = arr.filter(x => x !== word); saveKeywords(arr);
+
+  // 🔹 Log to Google Sheets
+  logKeywordChange('REMOVE', word, interaction.user).catch(()=>{});
+
+  return interaction.reply({ content: `✅ Removed keyword: \`${word}\`` });
+}
 
     // public: regions
     if (cmd === 'regions') {
@@ -410,61 +646,124 @@ client.on('interactionCreate', async (interaction) => {
       return interaction.reply({ content: `🧾 **${target.tag}** has **${count}/3** warnings.` });
     }
 
-    // warn (admin)
-    if (cmd === 'warn') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
-      const user = interaction.options.getUser('member');
-      const reason = interaction.options.getString('reason') || `Warned by ${interaction.user.tag}`;
-      const warnMap = getGuildWarnings(guild.id);
-      const current = warnMap.get(user.id) || 0;
-      const next = Math.min(3, current + 1);
-      warnMap.set(user.id, next);
+// warn (admin)
+if (cmd === 'warn') {
+  if (!isAdmin(interaction))
+    return interaction.reply({ content: '⛔ Admin only.' });
 
-      // DM embed to user
+  const user = interaction.options.getUser('member');
+  const reason =
+    interaction.options.getString('reason') ||
+    `Warned by ${interaction.user.tag}`;
+
+  const warnMap = getGuildWarnings(guild.id);
+  const current = warnMap.get(user.id) || 0;
+  const next = Math.min(3, current + 1);
+  warnMap.set(user.id, next);
+
+  // 🔹 Log warn event to Google Sheets
+  logWarnEvent(guild, user, interaction.user, reason, next).catch(() => {});
+
+  // 🔹 DM embed to the user
+  try {
+    const dm = new EmbedBuilder()
+      .setTitle('⚠️ You have received a warning')
+      .setDescription(`You received a warning in **${guild.name}**.`)
+      .addFields(
+        { name: 'Moderator', value: interaction.user.tag, inline: true },
+        { name: 'Reason', value: reason, inline: false },
+        { name: 'Warning Count', value: `${next}/3`, inline: true }
+      )
+      .setTimestamp();
+
+    if (RULES_LINK) {
+      dm.addFields({
+        name: '📜 Rules',
+        value: `[Click to view rules](${RULES_LINK})`,
+        inline: false
+      });
+    }
+
+    await user.send({ embeds: [dm] }).catch(() => {});
+  } catch {}
+
+  // 🔹 Reply in server
+  await interaction.reply({
+    content: `⚠️ Warned **${user.tag}** — now at **${next}/3** warnings.\n📝 ${reason}`
+  });
+
+  log(
+    guild,
+    `⚠️ ${interaction.user.tag} warned ${user.tag} — ${next}/3 — ${reason}`
+  );
+
+  // 🔥 Auto-ban at 3 warnings
+  if (next >= 3) {
+    bannedUsers.add(user.id);
+
+    try {
+      await guild.members.ban(user.id, {
+        reason: `Auto-ban at 3 warnings (last: ${reason})`
+      });
+
+      // Log ban to Google Sheets
+      logBanEvent(
+        guild,
+        user,
+        interaction.user,
+        `3 warnings — last: ${reason}`,
+        'AUTO_WARN_3'
+      ).catch(() => {});
+
+      // DM that they were banned
       try {
-        const dm = new EmbedBuilder()
-          .setTitle('⚠️ You have received a warning')
-          .setDescription(`You have received a warning in **${guild.name}**.`)
-          .addFields(
-            { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
-            { name: 'Reason', value: `${reason}`, inline: false },
-            { name: 'Warning Count', value: `${next}/3`, inline: true },
+        const banDM = new EmbedBuilder()
+          .setTitle('🚫 You have been banned')
+          .setDescription(
+            `You were **banned** from **${guild.name}** due to 3 warnings.`
           )
-          .setFooter({ text: RULES_LINK ? 'Please review the server rules.' : '' })
+          .addFields(
+            { name: 'Moderator', value: interaction.user.tag, inline: true },
+            { name: 'Reason', value: `3 warnings — last: ${reason}`, inline: false },
+            { name: 'Type', value: 'Lifetime Ban', inline: true }
+          )
           .setTimestamp();
-        if (RULES_LINK) dm.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
-        await user.send({ embeds: [dm] }).catch(()=>{});
+
+        if (RULES_LINK) {
+          banDM.addFields({
+            name: '📜 Rules',
+            value: `[Server Rules](${RULES_LINK})`,
+            inline: false
+          });
+        }
+
+        await user.send({ embeds: [banDM] }).catch(() => {});
       } catch {}
 
-      await interaction.reply({ content: `⚠️ Warned **${user.tag}** — now at **${next}/3**. 📝 ${reason}` });
-      log(guild, `⚠️ ${interaction.user.tag} warned ${user.tag} — ${next}/3 — ${reason}`);
+      await interaction.followUp({
+        content: `🚫 **${user.tag}** reached 3/3 warnings and was banned.`
+      });
 
-      // auto-ban at 3
-      if (next >= 3) {
-        bannedUsers.add(user.id);
-        try {
-          await guild.members.ban(user.id, { reason: `Auto-ban at 3 warnings (by ${interaction.user.tag})` });
-          const banDM = new EmbedBuilder()
-            .setTitle('🚫 You have been banned')
-            .setDescription(`You have been **banned** from **${guild.name}**.`)
-            .addFields(
-              { name: 'Moderator', value: `${interaction.user.tag}`, inline: true },
-              { name: 'Reason', value: `3 warnings — last: ${reason}`, inline: false },
-              { name: 'Type', value: 'Lifetime ban', inline: true },
-            )
-            .setTimestamp();
-          if (RULES_LINK) banDM.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
-          await user.send({ embeds: [banDM] }).catch(()=>{});
-          log(guild, `🚫 Auto-banned ${user.tag} at 3 warnings (by ${interaction.user.tag}).`);
-          await interaction.followUp({ content: `🚫 **${user.tag}** reached 3/3 warnings and was banned for life.` });
-        } catch (e) {
-          console.error('Auto-ban error', e);
-          await interaction.followUp({ content: `⚠️ Reached 3 warnings but could not ban ${user.tag}. Check my role/permissions.` });
-          log(guild, `⚠️ Could not auto-ban ${user.tag} at 3 warnings — role/permission issue.`);
-        }
-      }
-      return;
+      log(
+        guild,
+        `🚫 Auto-ban: ${user.tag} banned at 3 warnings (by ${interaction.user.tag}).`
+      );
+    } catch (e) {
+      console.error('Auto-ban error', e);
+
+      await interaction.followUp({
+        content: `⚠️ Warning reached 3/3 but I could NOT ban **${user.tag}**. Check bot role permissions.`
+      });
+
+      log(
+        guild,
+        `⚠️ Could not auto-ban ${user.tag} — role/permission issue.`
+      );
     }
+  }
+
+  return;
+}
 
     // clearwarns (admin)
     if (cmd === 'clearwarns') {
@@ -496,6 +795,10 @@ client.on('interactionCreate', async (interaction) => {
         if (RULES_LINK) banDM.addFields({ name: '📜 Rules', value: `[View rules](${RULES_LINK})`, inline: false });
         await user.send({ embeds: [banDM] }).catch(()=>{});
         await interaction.reply({ content: `🚫 Banned **${user.tag}**. 📝 ${reason}` });
+
+        // 🔹 Log manual ban to Google Sheets
+        logBanEvent(guild, user, interaction.user, reason, 'MANUAL').catch(()=>{});
+
         log(guild, `🚫 ${interaction.user.tag} banned ${user.tag} — ${reason}`);
       } catch (e) {
         console.error('ban error', e);
@@ -893,6 +1196,8 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
         members: membersSummary,
       };
       vcLogsArchive.push(summaryObj);
+      // 🔹 Also save VC session + members to Google Sheets
+      await saveSessionToGoogleSheets(summaryObj);
 
       // ---------- ADMIN DETAILED SESSION EMBED ----------
       const adminLines = membersSummary.map((m, i) => {
