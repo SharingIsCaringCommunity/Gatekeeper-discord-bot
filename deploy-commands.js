@@ -66,6 +66,36 @@ const commands = [
   new SlashCommandBuilder()
     .setName('listkeywords').setDescription('List blocked keywords (admin)')
     .setDefaultMemberPermissions(adminDefaultPerm).toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('mystats')
+    .setDescription('Show your personal voice channel activity stats')
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('vcleaderboard')
+    .setDescription('Show weekly and monthly voice channel leaderboards')
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('weekly')
+    .setDescription('Show weekly VC time breakdown (for you or a member)')
+    .addUserOption(o =>
+      o.setName('member')
+       .setDescription('Member to view (leave empty to view yourself)')
+       .setRequired(false)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('session')
+    .setDescription('Show live stats for your current voice channel session')
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName('monthly')
+    .setDescription('Show the latest monthly VC summary (if it has been generated)')
+    .toJSON(),
 ];
 
 (async () => {

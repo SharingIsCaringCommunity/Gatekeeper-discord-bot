@@ -555,6 +555,594 @@ client.on('interactionCreate', async (interaction) => {
   }
 });
 
+// ===== Voice Activity Tracker + Monthly Summary =====
+
+// File paths for persistent storage
+const VC_ACTIVE_FILE  = path.join(__dirname, 'vc_active_sessions.json');
+const VC_LOGS_FILE    = path.join(__dirname, 'vc_logs.json');
+const VC_AGG_FILE     = path.join(__dirname, 'vc_aggregates.json');
+const VC_MONTHLY_FILE = path.join(__dirname, 'vc_monthly.json');
+
+// Your dedicated VC channels
+const VC_STATS_CHANNEL_ID = '1448177256584314982'; // 🎙️-vc-stats-tracker
+const VC_LOG_CHANNEL_ID   = '1448175121289187429'; // 🤖-vc-log-recorder
+
+// Fallbacks to env-based channels if needed
+const VC_LOG_CHANNEL_FALLBACK   = process.env.VC_LOG_CHANNEL   || LOG_CHANNEL;
+const VC_STATS_CHANNEL_FALLBACK = process.env.VC_STATS_CHANNEL || STATS_CHANNEL;
+
+// ---------- JSON helpers ----------
+function safeReadJSON(file, fallback) {
+  try {
+    if (!fs.existsSync(file)) return fallback;
+    const txt = fs.readFileSync(file, 'utf8') || '';
+    return txt ? JSON.parse(txt) : fallback;
+  } catch (e) {
+    console.error('[VC] JSON read error', file, e);
+    return fallback;
+  }
+}
+function safeWriteJSON(file, obj) {
+  try {
+    fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    console.error('[VC] JSON write error', file, e);
+  }
+}
+
+// ---------- Time helpers ----------
+function msToHMS(ms) {
+  if (!ms || ms <= 0) return '0s';
+  const s    = Math.floor(ms / 1000);
+  const hrs  = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const secs = s % 60;
+  const parts = [];
+  if (hrs) parts.push(`${hrs}h`);
+  if (mins) parts.push(`${mins}m`);
+  if (secs && !hrs) parts.push(`${secs}s`);
+  return parts.join(' ') || '0s';
+}
+function getYearWeek(d = new Date()) {
+  const dt = new Date(Date.UTC(d.getFullYear(), d.getMonth(), d.getDate()));
+  const dayNum = dt.getUTCDay() || 7;
+  dt.setUTCDate(dt.getUTCDate() + 4 - dayNum);
+  const yearStart = new Date(Date.UTC(dt.getUTCFullYear(),0,1));
+  const weekNo = Math.ceil((((dt - yearStart) / 86400000) + 1)/7);
+  return `${dt.getUTCFullYear()}-W${String(weekNo).padStart(2,'0')}`;
+}
+function getYearMonth(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  return `${y}-${m}`;
+}
+function monthKeyFromDate(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  return `${y}-${m}`;
+}
+function prevMonthKey(d = new Date()) {
+  const dt = new Date(d);
+  dt.setMonth(dt.getMonth() - 1);
+  return monthKeyFromDate(dt);
+}
+function monthRangeForKey(key) {
+  const [y, m] = key.split('-').map(Number);
+  const start = new Date(y, m - 1, 1, 0, 0, 0);
+  const end   = new Date(y, m, 0, 23, 59, 59, 999);
+  return { start, end };
+}
+
+// ---------- In-memory VC data ----------
+let vcActiveSessions   = safeReadJSON(VC_ACTIVE_FILE,  {}); // { [guildId]: { [channelId]: { startTs, participants, joinedOrder } } }
+let vcLogsArchive      = safeReadJSON(VC_LOGS_FILE,    []); // array of per-session summaries
+let vcAggregates       = safeReadJSON(VC_AGG_FILE,     {}); // { [guildId]: { [userId]: { lifetimeMs, weekly, monthly } } }
+let vcMonthlySummaries = safeReadJSON(VC_MONTHLY_FILE, {}); // { [guildId]: { "YYYY-MM": summaryObj } }
+
+function ensureActiveSession(gid, cid) {
+  if (!vcActiveSessions[gid]) vcActiveSessions[gid] = {};
+  if (!vcActiveSessions[gid][cid]) {
+    vcActiveSessions[gid][cid] = {
+      startTs: Date.now(),
+      participants: {}, // userId -> { totalMs, currentJoinTs }
+      joinedOrder: []   // array of userIds in order of first join
+    };
+  }
+  return vcActiveSessions[gid][cid];
+}
+function ensureAggregate(gid, uid) {
+  if (!vcAggregates[gid]) vcAggregates[gid] = {};
+  if (!vcAggregates[gid][uid]) {
+    vcAggregates[gid][uid] = {
+      lifetimeMs: 0,
+      weekly: {},   // "YYYY-WW" -> ms
+      monthly: {},  // "YYYY-MM" -> ms
+    };
+  }
+  return vcAggregates[gid][uid];
+}
+
+// persist everything
+function persistAllVC() {
+  safeWriteJSON(VC_ACTIVE_FILE,  vcActiveSessions);
+  safeWriteJSON(VC_LOGS_FILE,    vcLogsArchive);
+  safeWriteJSON(VC_AGG_FILE,     vcAggregates);
+  safeWriteJSON(VC_MONTHLY_FILE, vcMonthlySummaries);
+}
+setInterval(persistAllVC, 30 * 1000);
+process.on('exit',   () => persistAllVC());
+process.on('SIGINT', () => { persistAllVC(); process.exit(); });
+process.on('SIGTERM',() => { persistAllVC(); process.exit(); });
+
+// ---------- Core: join / leave handlers ----------
+function handleVCJoin(guild, channel, user) {
+  try {
+    const gid = guild.id;
+    const cid = channel.id;
+    const session = ensureActiveSession(gid, cid);
+    if (!session.participants[user.id]) {
+      session.participants[user.id] = { totalMs: 0, currentJoinTs: Date.now() };
+      session.joinedOrder.push(user.id);
+    } else {
+      session.participants[user.id].currentJoinTs = Date.now();
+    }
+    vcActiveSessions[gid][cid] = session;
+    persistAllVC();
+  } catch (e) {
+    console.error('[VC] join error', e);
+  }
+}
+
+async function handleVCLeave(oldChannel, newChannel, user, guild) {
+  try {
+    const gid = guild.id;
+    const cid = oldChannel?.id;
+    if (!cid) return;
+    const session = vcActiveSessions?.[gid]?.[cid];
+    if (!session) return;
+
+    const part = session.participants[user.id];
+    if (part && part.currentJoinTs) {
+      const delta = Date.now() - part.currentJoinTs;
+      part.totalMs = (part.totalMs || 0) + delta;
+      part.currentJoinTs = null;
+
+      const agg = ensureAggregate(gid, user.id);
+      agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
+      const wk = getYearWeek(new Date());
+      const mo = getYearMonth(new Date());
+      agg.weekly[wk]  = (agg.weekly[wk]  || 0) + delta;
+      agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
+      vcAggregates[gid][user.id] = agg;
+    }
+
+    const ch = oldChannel;
+    // Channel became empty => finalize this VC session
+    if (ch && ch.members && ch.members.size === 0) {
+      // Close any still-open participants
+      for (const [uid, p] of Object.entries(session.participants)) {
+        if (p.currentJoinTs) {
+          const delta = Date.now() - p.currentJoinTs;
+          p.totalMs = (p.totalMs || 0) + delta;
+          p.currentJoinTs = null;
+
+          const agg = ensureAggregate(gid, uid);
+          agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
+          const wk = getYearWeek(new Date());
+          const mo = getYearMonth(new Date());
+          agg.weekly[wk]  = (agg.weekly[wk]  || 0) + delta;
+          agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
+          vcAggregates[gid][uid] = agg;
+        }
+      }
+
+      const start = new Date(session.startTs);
+      const end   = new Date();
+      let totalMs = 0;
+      const membersSummary = [];
+
+      for (const uid of session.joinedOrder) {
+        const p = session.participants[uid];
+        if (!p) continue;
+        totalMs += p.totalMs || 0;
+        let tag = `<@${uid}>`;
+        try {
+          const u = await client.users.fetch(uid).catch(()=>null);
+          if (u && u.tag) tag = u.tag;
+        } catch {}
+        membersSummary.push({ uid, tag, ms: p.totalMs || 0 });
+      }
+
+      // Save one session log entry
+      const summaryObj = {
+        guildId: gid,
+        channelId: cid,
+        channelName: ch.name,
+        start: start.toISOString(),
+        end: end.toISOString(),
+        durationMs: totalMs,
+        totalMembers: membersSummary.length,
+        members: membersSummary,
+      };
+      vcLogsArchive.push(summaryObj);
+
+      // Build embed
+      const embed = new EmbedBuilder()
+        .setTitle(`🎙️ VC Session Summary — ${ch.name}`)
+        .setDescription([
+          `**Channel:** ${ch.name}`,
+          `**Session start:** ${formatMYTTime(start)}`,
+          `**Session end:** ${formatMYTTime(end)}`,
+          `**Total members joined:** ${membersSummary.length}`,
+          `**Total voice time (sum):** ${msToHMS(totalMs)}`,
+          '',
+          '**Participants:**',
+        ].join('\n'))
+        .setColor(0x5865F2)
+        .setTimestamp();
+
+      for (const m of membersSummary.slice(0, 25)) {
+        embed.addFields({ name: m.tag, value: msToHMS(m.ms), inline: true });
+      }
+      if (membersSummary.length > 25) {
+        embed.addFields({ name: '…', value: `(${membersSummary.length - 25} more)`, inline: false });
+      }
+
+      // Send to admin VC log channel
+      try {
+        const adminCh =
+          guild.channels.cache.get(VC_LOG_CHANNEL_ID) ||
+          guild.channels.cache.get(VC_LOG_CHANNEL_FALLBACK);
+        if (adminCh) await adminCh.send({ embeds: [embed] }).catch(()=>{});
+      } catch (e) {
+        console.error('[VC] send admin log error', e);
+      }
+
+      // Send to public VC stats channel
+      try {
+        const statsCh =
+          guild.channels.cache.get(VC_STATS_CHANNEL_ID) ||
+          guild.channels.cache.get(VC_STATS_CHANNEL_FALLBACK);
+        if (statsCh) await statsCh.send({ embeds: [embed] }).catch(()=>{});
+      } catch (e) {
+        console.error('[VC] send stats error', e);
+      }
+
+      // Clear active session
+      delete vcActiveSessions[gid][cid];
+      if (!Object.keys(vcActiveSessions[gid]).length) delete vcActiveSessions[gid];
+      persistAllVC();
+    } else {
+      vcActiveSessions[gid][cid] = session;
+      persistAllVC();
+    }
+  } catch (e) {
+    console.error('[VC] leave error', e);
+  }
+}
+
+// ---------- Voice state listener ----------
+client.on('voiceStateUpdate', (oldState, newState) => {
+  try {
+    const oldChannel = oldState.channel;
+    const newChannel = newState.channel;
+    const guild = newState.guild || oldState.guild;
+    const user  = newState.member?.user || oldState.member?.user;
+    if (!guild || !user) return;
+
+    const joined = !oldChannel && newChannel;
+    const left   = oldChannel && !newChannel;
+    const moved  = oldChannel && newChannel && oldChannel.id !== newChannel.id;
+
+    if (joined) {
+      handleVCJoin(guild, newChannel, user);
+    } else if (left) {
+      handleVCLeave(oldChannel, null, user, guild);
+    } else if (moved) {
+      handleVCLeave(oldChannel, newChannel, user, guild);
+      handleVCJoin(guild, newChannel, user);
+    }
+  } catch (e) {
+    console.error('[VC] voiceStateUpdate handler error', e);
+  }
+});
+
+// ---------- Monthly summary builder ----------
+function buildMonthlySummaryForKey(guildId, key) {
+  const { start, end } = monthRangeForKey(key);
+  const sessions = (vcLogsArchive || []).filter(s =>
+    s.guildId === guildId &&
+    new Date(s.end) >= start &&
+    new Date(s.end) <= end
+  );
+
+  const perUser = {};
+  let totalMs = 0;
+
+  for (const s of sessions) {
+    for (const m of s.members || []) {
+      if (!perUser[m.uid]) perUser[m.uid] = { ms: 0, sessions: 0 };
+      perUser[m.uid].ms       += (m.ms || 0);
+      perUser[m.uid].sessions += 1;
+      totalMs                 += (m.ms || 0);
+    }
+  }
+
+  const members = Object.entries(perUser)
+    .map(([uid, v]) => ({ uid, ms: v.ms, sessions: v.sessions }))
+    .sort((a, b) => b.ms - a.ms);
+
+  return {
+    key,
+    guildId,
+    start: start.toISOString(),
+    end: end.toISOString(),
+    generatedAt: new Date().toISOString(),
+    totalSessions: sessions.length,
+    totalMs,
+    members,
+  };
+}
+
+async function monthlyEmbedFromSummary(guild, summary) {
+  const start = new Date(summary.start);
+  const end   = new Date(summary.end);
+  const emb = new EmbedBuilder()
+    .setTitle(`📅 Monthly VC Summary — ${guild.name} — ${summary.key}`)
+    .setDescription([
+      `**Period:** ${formatMYTTime(start)} — ${formatMYTTime(end)}`,
+      `**Generated:** ${formatMYTTime(new Date(summary.generatedAt))}`,
+      `**Total sessions:** ${summary.totalSessions}`,
+      `**Total voice time (sum):** ${msToHMS(summary.totalMs)}`,
+      '',
+      '**Member breakdown:**',
+    ].join('\n'))
+    .setColor(0x1abc9c)
+    .setTimestamp();
+
+  const lines = [];
+  for (const m of summary.members) {
+    let tag = `<@${m.uid}>`;
+    try {
+      const u = await client.users.fetch(m.uid).catch(()=>null);
+      if (u && u.tag) tag = u.tag;
+    } catch {}
+    lines.push(`${tag} — ${msToHMS(m.ms)} (${m.sessions} sessions)`);
+  }
+
+  const fullText = lines.join('\n');
+  if (fullText.length <= 3800) {
+    emb.addFields({ name: 'All members', value: fullText || '_No data_' });
+    return { embed: emb, file: null };
+  } else {
+    const top25 = lines.slice(0, 25).join('\n');
+    emb.addFields({ name: 'Top 25 members', value: top25 || '_No data_' });
+    const fileContent = ['Member — Time — Sessions', ...lines].join('\n');
+    const buffer = Buffer.from(fileContent, 'utf8');
+    return {
+      embed: emb,
+      file: { name: `vc_monthly_${guild.id}_${summary.key}.txt`, content: buffer },
+    };
+  }
+}
+
+async function postAndSaveMonthlySummary(guild, summary) {
+  try {
+    if (!vcMonthlySummaries[guild.id]) vcMonthlySummaries[guild.id] = {};
+    vcMonthlySummaries[guild.id][summary.key] = summary;
+    safeWriteJSON(VC_MONTHLY_FILE, vcMonthlySummaries);
+
+    const { embed, file } = await monthlyEmbedFromSummary(guild, summary);
+
+    // Admin log
+    try {
+      const adminCh =
+        guild.channels.cache.get(VC_LOG_CHANNEL_ID) ||
+        guild.channels.cache.get(VC_LOG_CHANNEL_FALLBACK);
+      if (adminCh) {
+        if (file) {
+          await adminCh.send({ embeds: [embed], files: [{ attachment: file.content, name: file.name }] }).catch(()=>{});
+        } else {
+          await adminCh.send({ embeds: [embed] }).catch(()=>{});
+        }
+      }
+    } catch (e) {
+      console.error('[VC][Monthly] admin send error', e);
+    }
+
+    // Public stats
+    try {
+      const statsCh =
+        guild.channels.cache.get(VC_STATS_CHANNEL_ID) ||
+        guild.channels.cache.get(VC_STATS_CHANNEL_FALLBACK);
+      if (statsCh) {
+        if (file) {
+          await statsCh.send({ embeds: [embed], files: [{ attachment: file.content, name: file.name }] }).catch(()=>{});
+        } else {
+          await statsCh.send({ embeds: [embed] }).catch(()=>{});
+        }
+      }
+    } catch (e) {
+      console.error('[VC][Monthly] stats send error', e);
+    }
+  } catch (e) {
+    console.error('[VC][Monthly] postAndSave error', e);
+  }
+}
+
+// Daily check (MYT): if day == 1 -> generate previous month summary
+async function runDailyCheck() {
+  try {
+    const tz = 'Asia/Kuala_Lumpur';
+    const now = new Date();
+    const fmt = new Intl.DateTimeFormat('en-CA', {
+      timeZone: tz,
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    const [y, m, d] = fmt.format(now).split('-').map(Number);
+    if (d !== 1) return; // Only act on 1st of month (MYT)
+
+    for (const [, guild] of client.guilds.cache) {
+      try {
+        const key = prevMonthKey(now);
+        if (vcMonthlySummaries[guild.id] && vcMonthlySummaries[guild.id][key]) continue;
+        const summary = buildMonthlySummaryForKey(guild.id, key);
+        await postAndSaveMonthlySummary(guild, summary);
+        console.log(`[VC][Monthly] Generated summary ${key} for guild ${guild.name}`);
+      } catch (e) {
+        console.error('[VC][Monthly] per-guild error', e);
+      }
+    }
+  } catch (e) {
+    console.error('[VC][Monthly] runDailyCheck error', e);
+  }
+}
+
+// Run once now, then every 24h
+runDailyCheck();
+setInterval(runDailyCheck, 24 * 60 * 60 * 1000);
+
+// ---------- VC Slash commands (/mystats, /vcleaderboard, /weekly, /session, /monthly) ----------
+client.on('interactionCreate', async (interaction) => {
+  try {
+    if (!interaction.isChatInputCommand()) return;
+    const cmd   = interaction.commandName;
+    const guild = interaction.guild;
+    const user  = interaction.user;
+    if (!guild) return;
+
+    // /mystats
+    if (cmd === 'mystats') {
+      const gid = guild.id;
+      const agg = (vcAggregates[gid] && vcAggregates[gid][user.id]) || { lifetimeMs: 0, weekly: {}, monthly: {} };
+      const wkKey = getYearWeek(new Date());
+      const moKey = getYearMonth(new Date());
+      const emb = new EmbedBuilder()
+        .setTitle(`📊 VC Stats — ${user.tag}`)
+        .addFields(
+          { name: 'Lifetime', value: msToHMS(agg.lifetimeMs || 0), inline: true },
+          { name: `This week (${wkKey})`, value: msToHMS((agg.weekly && agg.weekly[wkKey]) || 0), inline: true },
+          { name: `This month (${moKey})`, value: msToHMS((agg.monthly && agg.monthly[moKey]) || 0), inline: true },
+        )
+        .setTimestamp();
+      return interaction.reply({ embeds: [emb], ephemeral: true });
+    }
+
+    // /vcleaderboard
+    if (cmd === 'vcleaderboard') {
+      const gid   = guild.id;
+      const wkKey = getYearWeek(new Date());
+      const moKey = getYearMonth(new Date());
+      const aggGuild = vcAggregates[gid] || {};
+
+      const arr = Object.entries(aggGuild).map(([uid, data]) => ({
+        uid,
+        lifetime: data.lifetimeMs || 0,
+        weekly: (data.weekly && data.weekly[wkKey]) || 0,
+        monthly: (data.monthly && data.monthly[moKey]) || 0,
+      }));
+
+      const topWeekly  = [...arr].sort((a, b) => b.weekly  - a.weekly).slice(0, 10);
+      const topMonthly = [...arr].sort((a, b) => b.monthly - a.monthly).slice(0, 10);
+
+      const wkLines = await Promise.all(topWeekly.map(async (it, i) => {
+        let tag = `<@${it.uid}>`;
+        try { const u = await client.users.fetch(it.uid); if (u && u.tag) tag = u.tag; } catch {}
+        return `**${i+1}.** ${tag} — ${msToHMS(it.weekly)}`;
+      }));
+      const moLines = await Promise.all(topMonthly.map(async (it, i) => {
+        let tag = `<@${it.uid}>`;
+        try { const u = await client.users.fetch(it.uid); if (u && u.tag) tag = u.tag; } catch {}
+        return `**${i+1}.** ${tag} — ${msToHMS(it.monthly)}`;
+      }));
+
+      const emb = new EmbedBuilder()
+        .setTitle('🏆 Voice Leaderboards')
+        .setDescription(`Top members — Weekly (${wkKey}) & Monthly (${moKey})`)
+        .addFields(
+          { name: `Weekly — Top ${wkLines.length}`, value: wkLines.join('\n') || '_No data_', inline: true },
+          { name: `Monthly — Top ${moLines.length}`, value: moLines.join('\n') || '_No data_', inline: true },
+        )
+        .setTimestamp();
+      return interaction.reply({ embeds: [emb] });
+    }
+
+    // /weekly [member?]
+    if (cmd === 'weekly') {
+      const target = interaction.options.getUser('member') || user;
+      const gid    = guild.id;
+      const agg = (vcAggregates[gid] && vcAggregates[gid][target.id]) || { lifetimeMs: 0, weekly: {}, monthly: {} };
+      const keys = Object.keys(agg.weekly || {}).sort().slice(-6).reverse();
+      const lines = keys.map(k => `${k} — ${msToHMS(agg.weekly[k])}`);
+      const emb = new EmbedBuilder()
+        .setTitle(`📈 Weekly VC Breakdown — ${target.tag}`)
+        .setDescription(lines.join('\n') || '_No weekly data_')
+        .setTimestamp();
+      return interaction.reply({ embeds: [emb], ephemeral: true });
+    }
+
+    // /session
+    if (cmd === 'session') {
+      const member = guild.members.cache.get(user.id);
+      const ch = member?.voice?.channel;
+      if (!ch) return interaction.reply({ content: 'You are not in a voice channel.', ephemeral: true });
+
+      const gid = guild.id;
+      const cid = ch.id;
+      const session = vcActiveSessions?.[gid]?.[cid];
+      if (!session) return interaction.reply({ content: 'No active tracking for this channel yet.', ephemeral: true });
+
+      const parts = [];
+      for (const uid of session.joinedOrder) {
+        const p = session.participants[uid];
+        if (!p) continue;
+        const inNow = p.currentJoinTs ? (Date.now() - p.currentJoinTs) : 0;
+        const total = (p.totalMs || 0) + inNow;
+        parts.push(`${p.currentJoinTs ? '🔴' : '⚪'} <@${uid}> — ${msToHMS(total)}`);
+      }
+
+      const emb = new EmbedBuilder()
+        .setTitle(`🔔 Live VC Tracking — ${ch.name}`)
+        .setDescription(parts.join('\n') || '_No participants tracked_')
+        .setFooter({ text: `Session started: ${formatMYTTime(new Date(session.startTs))}` })
+        .setTimestamp();
+      return interaction.reply({ embeds: [emb], ephemeral: true });
+    }
+
+    // /monthly — only after monthly summary has been generated
+    if (cmd === 'monthly') {
+      const gid = guild.id;
+      const key = prevMonthKey(new Date()); // "last month" summary
+      const guildSummaries = vcMonthlySummaries[gid] || {};
+      if (!guildSummaries[key]) {
+        return interaction.reply({
+          content: '❌ Sorry, this month’s summary is not ready yet. Please check again at the end of the month.',
+          ephemeral: true,
+        });
+      }
+      const summary = guildSummaries[key];
+      const { embed, file } = await monthlyEmbedFromSummary(guild, summary);
+      if (file) {
+        return interaction.reply({
+          embeds: [embed],
+          files: [{ attachment: file.content, name: file.name }],
+          ephemeral: true,
+        });
+      } else {
+        return interaction.reply({ embeds: [embed], ephemeral: true });
+      }
+    }
+
+  } catch (e) {
+    console.error('[VC] interaction handler error', e);
+    if (!interaction.replied) {
+      interaction.reply({ content: '❌ VC stats error. Try again later.', ephemeral: true }).catch(()=>{});
+    }
+  }
+});
+
 // ===== Safety listeners =====
 client.on('error', console.error);
 client.on('shardError', console.error);
