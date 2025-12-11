@@ -88,7 +88,9 @@ async function syncExistingBansToSheet(guild) {
 
 const { google } = require('googleapis');
 
-// ===== Google Sheets config =====
+// ------------------ Google Sheets ------------------
+const { google } = require('googleapis');
+
 const GOOGLE_CLIENT_EMAIL = process.env.GOOGLE_CLIENT_EMAIL || '';
 const GOOGLE_PRIVATE_KEY  = process.env.GOOGLE_PRIVATE_KEY  || '';
 const GOOGLE_SHEET_ID     = process.env.GOOGLE_SHEET_ID     || '';
@@ -113,78 +115,185 @@ function getSheetsClient() {
   return sheetsClient;
 }
 
-async function appendSheet(range, values) {
+/**
+ * Convert an ISO timestamp / Date to Malaysia time string for human-readable fields.
+ * Keeps ISO for raw data storage where needed.
+ */
+function toMalaysiaTimeIso(date) {
+  const d = (date instanceof Date) ? date : new Date(date);
+  // use toLocaleString to show MYT
+  const iso = d.toLocaleString('en-GB', { timeZone: 'Asia/Kuala_Lumpur', hour12: false });
+  return iso;
+}
+
+// Ensure a sheet (tab) with the given title exists. If missing, create it.
+async function ensureSheetExists(sheets, spreadsheetId, title, headerRow = [], headerNote = '') {
   try {
-    const sheets = getSheetsClient();
-    if (!sheets) return;
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: GOOGLE_SHEET_ID,
-      range,
-      valueInputOption: 'RAW',
-      requestBody: { values },
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const sheetsMeta = meta.data.sheets || [];
+    const found = sheetsMeta.find(s => s.properties && s.properties.title === title);
+    if (found) return found.properties.sheetId;
+
+    // create sheet
+    const requests = [
+      {
+        addSheet: {
+          properties: {
+            title,
+            gridProperties: { rowCount: 1000, columnCount: 12 },
+          }
+        }
+      }
+    ];
+
+    // Add the new sheet
+    const batchRes = await sheets.spreadsheets.batchUpdate({
+      spreadsheetId,
+      requestBody: { requests }
     });
+
+    const newSheetId = batchRes.data.replies?.[0]?.addSheet?.properties?.sheetId;
+    // write header and formatting if provided
+    if (headerRow && headerRow.length) {
+      // write header and title rows
+      const values = [];
+      // Row 1: Big Title
+      values.push([headerNote || title]);
+      // Row 2: blank spacer
+      values.push(['']);
+      // Row 3: column headers
+      values.push(headerRow);
+
+      await sheets.spreadsheets.values.update({
+        spreadsheetId,
+        range: `${title}!A1:${String.fromCharCode(65 + Math.max(0, headerRow.length - 1))}3`,
+        valueInputOption: 'RAW',
+        requestBody: { values }
+      });
+
+      // formatting: make first row big, merge first-row across columns, bold headers, background color
+      const headerRangeEndCol = headerRow.length - 1;
+      const requestsFormat = [
+        // merge first row across header columns
+        {
+          mergeCells: {
+            range: {
+              sheetId: newSheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: headerRow.length
+            },
+            mergeType: 'MERGE_ALL'
+          }
+        },
+        // set big title style
+        {
+          repeatCell: {
+            range: {
+              sheetId: newSheetId,
+              startRowIndex: 0,
+              endRowIndex: 1,
+              startColumnIndex: 0,
+              endColumnIndex: headerRow.length
+            },
+            cell: {
+              userEnteredFormat: {
+                horizontalAlignment: 'CENTER',
+                verticalAlignment: 'MIDDLE',
+                textFormat: { bold: true, fontSize: 14 }
+              }
+            },
+            fields: 'userEnteredFormat(horizontalAlignment,verticalAlignment,textFormat)'
+          }
+        },
+        // header row (row index 2) format
+        {
+          repeatCell: {
+            range: {
+              sheetId: newSheetId,
+              startRowIndex: 2,
+              endRowIndex: 3,
+              startColumnIndex: 0,
+              endColumnIndex: headerRow.length
+            },
+            cell: {
+              userEnteredFormat: {
+                backgroundColor: { red: 0.15, green: 0.15, blue: 0.15 },
+                horizontalAlignment: 'CENTER',
+                textFormat: { bold: true, foregroundColor: { red: 1, green: 1, blue: 1 } }
+              }
+            },
+            fields: 'userEnteredFormat(backgroundColor,textFormat,horizontalAlignment)'
+          }
+        },
+        // freeze first 3 rows
+        {
+          updateSheetProperties: {
+            properties: {
+              sheetId: newSheetId,
+              gridProperties: { frozenRowCount: 3 }
+            },
+            fields: 'gridProperties.frozenRowCount'
+          }
+        }
+      ];
+
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId,
+        requestBody: { requests: requestsFormat }
+      });
+    }
+
+    return newSheetId;
   } catch (e) {
-    console.error('[Sheets] appendSheet error', e?.message || e);
+    console.error('[Sheets] ensureSheetExists error', e?.message || e);
+    return null;
   }
 }
 
-// ===== High-level log helpers for each tab =====
-//
-// Keywords sheet: Keywords!A:E
-// Headers: keyword | action | byTag | byId | at
-async function logKeywordChange(action, word, user) {
+// Utility to append values then run an auto-sort on date/time column (if requested)
+async function appendAndSort(sheets, spreadsheetId, sheetTitle, values, sortColumnIndex = 0) {
   try {
-    await appendSheet('Keywords!A2', [[
-      word,
-      action,
-      user?.tag || 'unknown',
-      user?.id  || 'unknown',
-      new Date().toISOString(),
-    ]]);
+    // append
+    await sheets.spreadsheets.values.append({
+      spreadsheetId,
+      range: `${sheetTitle}!A1`,
+      valueInputOption: 'RAW',
+      insertDataOption: 'INSERT_ROWS',
+      requestBody: { values }
+    });
+
+    // find sheet id
+    const meta = await sheets.spreadsheets.get({ spreadsheetId });
+    const s = (meta.data.sheets || []).find(x => x.properties.title === sheetTitle);
+    if (!s) return;
+    const sheetId = s.properties.sheetId;
+
+    // apply sort on entire data (from row 4 onward - because we used 1:title,2:spacer,3:headers)
+    const requests = [
+      {
+        sortRange: {
+          range: {
+            sheetId,
+            startRowIndex: 3, // zero-based -> row 4 in spreadsheet
+            startColumnIndex: 0,
+            endColumnIndex: 20, // large number to cover many columns
+          },
+          sortSpecs: [
+            { dimensionIndex: sortColumnIndex, sortOrder: 'DESCENDING' } // newest first
+          ]
+        }
+      }
+    ];
+
+    await sheets.spreadsheets.batchUpdate({ spreadsheetId, requestBody: { requests } });
   } catch (e) {
-    console.error('[Sheets] logKeywordChange error', e?.message || e);
+    console.error('[Sheets] appendAndSort error', e?.message || e);
   }
 }
 
-// WarnList sheet: WarnList!A:G
-// Headers: guildId | userId | username | moderator | reason | warningCount | at
-async function logWarnEvent(guild, targetUser, moderatorUser, reason, count) {
-  try {
-    await appendSheet('WarnList!A2', [[
-      guild?.id || 'unknown',
-      targetUser?.id || 'unknown',
-      targetUser?.tag || 'unknown',
-      moderatorUser?.tag || 'unknown',
-      reason || '',
-      String(count ?? ''),
-      new Date().toISOString(),
-    ]]);
-  } catch (e) {
-    console.error('[Sheets] logWarnEvent error', e?.message || e);
-  }
-}
-
-// BanList sheet: BanList!A:G
-// Headers: guildId | userId | username | moderator | reason | banType | at
-async function logBanEvent(guild, targetUser, moderatorUser, reason, type) {
-  try {
-    await appendSheet('BanList!A2', [[
-      guild?.id || 'unknown',
-      targetUser?.id || 'unknown',
-      targetUser?.tag || 'unknown',
-      moderatorUser?.tag || 'unknown',
-      reason || '',
-      type || '',
-      new Date().toISOString(),
-    ]]);
-  } catch (e) {
-    console.error('[Sheets] logBanEvent error', e?.message || e);
-  }
-}
-
-// VC_Sessions & VC_Members
-// VC_Sessions headers: guildId | channelId | channelName | start | end | durationMs | totalMembers | loggedAt
-// VC_Members headers: guildId | channelId | userId | usernameTag | ms | rejoinCount | sessionStart | sessionEnd
+// Replace previous saveSessionToGoogleSheets with this upgraded version
 async function saveSessionToGoogleSheets(summaryObj) {
   try {
     const sheets = getSheetsClient();
@@ -201,49 +310,95 @@ async function saveSessionToGoogleSheets(summaryObj) {
       members,
     } = summaryObj;
 
+    // MASTER tabs (ensure exist, with headers and title)
+    await ensureSheetExists(sheets, GOOGLE_SHEET_ID, 'VC_Sessions', [
+      'Logged At (MYT)', 'Guild ID', 'Channel ID', 'Channel Name', 'Session Start (MYT)', 'Session End (MYT)', 'Duration (ms)', 'Total Members'
+    ], 'VC Sessions (master)');
+
+    await ensureSheetExists(sheets, GOOGLE_SHEET_ID, 'VC_Members', [
+      'Logged At (MYT)', 'Guild ID', 'Channel ID', 'User ID', 'UsernameTag', 'Time (ms)', 'RejoinCount', 'SessionStart (MYT)', 'SessionEnd (MYT)'
+    ], 'VC Members (master)');
+
+    // DAILY sheet (YYYY-MM-DD) inside spreadsheet
+    const dayKey = new Date(end).toISOString().slice(0,10); // YYYY-MM-DD
+    const dailySheetTitle = `${dayKey}`; // e.g., 2025-12-11
+    await ensureSheetExists(sheets, GOOGLE_SHEET_ID, dailySheetTitle, [
+      'Logged At (MYT)', 'Guild ID', 'Channel ID', 'Channel Name', 'User ID', 'UsernameTag', 'Time (ms)', 'RejoinCount', 'SessionStart (MYT)', 'SessionEnd (MYT)'
+    ], `Daily VC logs — ${dayKey}`);
+
+    // prepare master session row (use Malaysia time string for readability)
+    const loggedAtMYT = toMalaysiaTimeIso(new Date());
     const sessionRow = [
+      loggedAtMYT,
       guildId,
       channelId,
       channelName,
-      start,
-      end,
-      durationMs,
-      totalMembers,
-      new Date().toISOString(), // loggedAt
+      toMalaysiaTimeIso(start),
+      toMalaysiaTimeIso(end),
+      String(durationMs || 0),
+      String(totalMembers || 0)
     ];
 
-    // 1) Session row
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: GOOGLE_SHEET_ID,
-      range: 'VC_Sessions!A2',
-      valueInputOption: 'RAW',
-      requestBody: { values: [sessionRow] },
-    });
+    // append to VC_Sessions and sort by Logged At
+    await appendAndSort(sheets, GOOGLE_SHEET_ID, 'VC_Sessions', [sessionRow], 0);
 
-    // 2) Member rows
-    const memberRows = (members || []).map((m) => [
+    // member rows: one per member (also append to master and daily)
+    const memberRowsForMaster = (members || []).map(m => [
+      loggedAtMYT,
       guildId,
       channelId,
       m.uid,
       m.tag,
-      m.ms,
-      m.rejoinCount || 0,
-      start,
-      end,
+      String(m.ms || 0),
+      String(m.rejoinCount || 0),
+      toMalaysiaTimeIso(m.firstJoinTs || start),
+      toMalaysiaTimeIso(m.lastLeaveTs || end)
     ]);
 
-    if (memberRows.length) {
-      await sheets.spreadsheets.values.append({
-        spreadsheetId: GOOGLE_SHEET_ID,
-        range: 'VC_Members!A2',
-        valueInputOption: 'RAW',
-        requestBody: { values: memberRows },
-      });
+    // append to VC_Members and sort
+    if (memberRowsForMaster.length) {
+      for (const r of memberRowsForMaster) {
+        await appendAndSort(sheets, GOOGLE_SHEET_ID, 'VC_Members', [r], 0);
+      }
     }
 
-    console.log('[Sheets] Saved VC session + members to Google Sheets.');
+    // Also append into DAILY sheet
+    const memberRowsDaily = (members || []).map(m => [
+      loggedAtMYT,
+      guildId,
+      channelId,
+      channelName,
+      m.uid,
+      m.tag,
+      String(m.ms || 0),
+      String(m.rejoinCount || 0),
+      toMalaysiaTimeIso(m.firstJoinTs || start),
+      toMalaysiaTimeIso(m.lastLeaveTs || end)
+    ]);
+    if (memberRowsDaily.length) {
+      for (const r of memberRowsDaily) {
+        await appendAndSort(sheets, GOOGLE_SHEET_ID, dailySheetTitle, [r], 0);
+      }
+    }
+
+    console.log('[Sheets] Saved VC session + members to Google Sheets (master + daily).');
   } catch (e) {
     console.error('[Sheets] saveSessionToGoogleSheets error', e?.message || e);
+  }
+}
+
+/**
+ * Optionally create a simple Dashboard sheet (one-time)
+ * - If "Dashboard" sheet exists it will not recreate; you can extend this function.
+ */
+async function ensureDashboard(sheets) {
+  try {
+    const spreadsheetId = GOOGLE_SHEET_ID;
+    await ensureSheetExists(sheets, spreadsheetId, 'Dashboard', ['Metric', 'Value'], 'VC Dashboard (auto-generated)');
+    // populate a simple summary (example: total sessions this month). You can expand with formulas.
+    // This is intentionally conservative — more complex charts require adding chart specs with batchUpdate.
+  } catch (e) {
+    console.error('[Sheets] ensureDashboard error', e?.message || e);
   }
 }
 
