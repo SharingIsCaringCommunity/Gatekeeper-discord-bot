@@ -350,40 +350,40 @@ async function loadVCDataFromSheets() {
 
     console.log(`[Sheets] VC_Members loaded.`);
 
-    // =============================
-    // LOAD VC_Sessions
-    // =============================
-    const sessions = await readRange('VC_Sessions', 'A4:Z10000');
+// =============================
+// LOAD VC_Sessions
+// =============================
+const sessions = await readRange('VC_Sessions', 'A4:Z10000');
 
-    vcLogsArchive = [];
+vcLogsArchive = [];
 
-    for (const row of sessions) {
-      if (!row[1]) continue; // guildId required
+for (const row of sessions) {
+  if (!row[1]) continue; // guildId required
 
-      const guildId     = row[1];
-      const channelId   = row[2];
-      const channelName = row[3];
-      const startIso    = safeToISOStringMaybe(row[4]);
-      const endIso      = safeToISOStringMaybe(row[5]);
-      const durationMs  = Number(row[6] || 0);
-      const totalMembers = Number(row[7] || 0);
+  const guildId     = row[1];
+  const channelId   = row[2];
+  const channelName = row[3];
+  const startIso    = safeToISOStringMaybe(row[4]);
+  const endIso      = safeToISOStringMaybe(row[5]);
+  const durationMs  = Number(row[6] || 0);
+  const totalMembers = Number(row[7] || 0);
 
-      const start = safeParseDate(startIso) || new Date();
-      const end   = safeParseDate(endIso)   || new Date();
+  const start = safeParseDate(startIso) || new Date();
+  const end   = safeParseDate(endIso)   || new Date();
 
-      vcLogsArchive.push({
-        guildId,
-        channelId,
-        channelName,
-        start: new Date(session.startTs).toISOString(),
-        end: end.toISOString(),
-        durationMs,
-        totalMembers,
-        members: [] // members are in VC_Members sheet
-      });
-    }
+  vcLogsArchive.push({
+    guildId,
+    channelId,
+    channelName,
+    start: start.toISOString(),   // ✅ FIXED
+    end: end.toISOString(),
+    durationMs,
+    totalMembers,
+    members: [] // Members loaded from VC_Members separately
+  });
+}
 
-    console.log(`[Sheets] Loaded ${vcLogsArchive.length} VC sessions.`);
+console.log(`[Sheets] Loaded ${vcLogsArchive.length} VC sessions.`);
 
   } catch (e) {
     console.error('[Sheets] loadVCDataFromSheets ERROR:', e);
@@ -861,6 +861,7 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
   }
 }
 
+      const start = new Date(session.startTs);  
       const end   = new Date();
       const membersSummary = [];
       let totalMs = 0;
@@ -1453,7 +1454,7 @@ setInterval(() => {
 
 // login 
 client.login(TOKEN).catch(err => { 
-  console.error('Failed to login:', err); 
+  console.error('Failed to login:', err);   
   process.exit(1); 
 });
 
