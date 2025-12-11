@@ -481,7 +481,10 @@ async function removeWarnsFromSheet(userId, guildId) {
 
   try {
     const sheetId = await getSheetId("WarnList");
-    if (!sheetId) return;
+    if (!sheetId) {
+      console.warn("[Sheets] WarnList sheet missing, cannot delete row.");
+      return;
+    }
 
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: GOOGLE_SHEET_ID,
@@ -490,7 +493,7 @@ async function removeWarnsFromSheet(userId, guildId) {
 
     const rows = res.data.values || [];
     const deleteRequests = [];
-    let rowIndex = 3;
+    let rowIndex = 3; // spreadsheet rows start at 1, and we read from row 3
 
     for (const row of rows) {
       const gid = row[0];
@@ -544,12 +547,11 @@ async function loadAllFromSheets() {
 
   // Now load data
   await Promise.all([
-    loadBanListFromSheet(),
-    loadWarnsFromSheet(),
-    loadKeywordsFromSheet(),
-    loadVCDataFromSheets(),
-    loadMonthlySummariesFromSheet()
-  ]);
+  loadBanListFromSheet(),
+  loadKeywordsFromSheet(),
+  loadVCDataFromSheets(),
+  loadMonthlySummariesFromSheet()
+]);
 }
 
 // ------------------- Logging to Sheets (write functions) -------------------
@@ -1239,40 +1241,39 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-// /pardon (unban by id)
 if (cmd === 'pardon') {
   if (!isAdmin(interaction)) 
     return interaction.reply({ content: '⛔ Admin only.' });
 
-  const userId = interaction.options.getString('user_id');
-  const reason = interaction.options.getString('reason') || `Pardon by ${interaction.user.tag}`;
+  const userId = interaction.options.getString('userid');
+  const reason = interaction.options.getString('reason') || 'Pardoned by admin';
 
-  // Remove from memory
+  // Remove from in-memory ban list
   bannedUsers.delete(userId);
-  getGuildWarnings(guild.id).set(userId, 0);
 
-  // Remove from Google Sheets
-  await removeBanFromSheet(userId);
-  await removeWarnsFromSheet(userId, guild.id);   // ← THIS WAS MISSING
+  // Remove from sheet
+  await removeBanFromSheet(userId).catch(()=>{});
+  await removeWarnsFromSheet(userId, guild.id).catch(()=>{});
 
-  // Discord unban
+  // Safe unban
   try {
-    await guild.bans.remove(userId, reason);
-
-    let tag = userId;
-    try { 
-      const u = await client.users.fetch(userId); 
-      tag = u.tag || userId; 
-    } catch {}
-
-    return interaction.reply({
-      content: `🟢 **${tag}** has been pardoned.\n📝 ${reason}`
-    });
-
+    const bans = await guild.bans.fetch();
+if (bans.has(userId)) {
+    await guild.bans.remove(userId);
+}
   } catch (e) {
-    console.error('pardon error', e);
-    return interaction.reply({ content: '⚠️ Failed to unban this user (maybe not banned?).' });
+    console.warn("Unban skipped:", e);
   }
+
+  let tag = userId;
+  try {
+    const u = await client.users.fetch(userId);
+    if (u && u.tag) tag = u.tag;
+  } catch {}
+
+  return interaction.reply({
+    content: `🟢 **${tag}** has been pardoned.\n📝 ${reason}`
+  });
 }
 
     // /banlist
