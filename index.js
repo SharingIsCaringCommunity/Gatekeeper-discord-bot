@@ -1243,39 +1243,44 @@ client.on('interactionCreate', async (interaction) => {
     }
 
     if (cmd === 'pardon') {
-      if (!isAdmin(interaction)) 
-        return interaction.reply({ content: '⛔ Admin only.' });
+  if (!isAdmin(interaction))
+    return interaction.reply({ content: '⛔ Admin only.' });
 
-      const userId = interaction.options.getString('userid');
-      const reason = interaction.options.getString('reason') || 'Pardoned by admin';
+  const userId = interaction.options.getString('userid');
+  const reason = interaction.options.getString('reason') || 'Pardoned by admin';
 
-      // Remove from in-memory ban list
-      bannedUsers.delete(userId);
+  // Remove from in-memory ban set
+  bannedUsers.delete(userId);
 
-      // Remove from sheet
-      await removeBanFromSheet(userId).catch(()=>{});
-      await removeWarnsFromSheet(userId, guild.id).catch(()=>{});
+  // Remove from Google Sheets
+  await removeBanFromSheet(userId).catch(() => {});
+  await removeWarnsFromSheet(userId, guild.id).catch(() => {});
 
-      // Safe unban
-      try {
-        const bans = await guild.bans.fetch();
-        if (bans.has(userId)) {
-          await guild.bans.remove(userId);
-        }
-      } catch (e) {
-        console.warn("Unban skipped:", e);
-      }
-
-      let tag = userId;
-      try {
-        const u = await client.users.fetch(userId);
-        if (u && u.tag) tag = u.tag;
-      } catch {}
-
-      return interaction.reply({
-        content: `🟢 **${tag}** has been pardoned.\n📝 ${reason}`
-      });
+  // Safe unban from Discord
+  try {
+    const bans = await guild.bans.fetch();
+    if (bans.has(userId)) {
+      await guild.bans.remove(userId).catch(() => {});
     }
+  } catch (e) {
+    console.warn("Unban skipped:", e);
+  }
+
+  // ---------- FIXED USER TAG DISPLAY ----------
+  let tag = `<@${userId}>`; // fallback mention (NEVER NULL)
+
+  try {
+    const u = await client.users.fetch(userId, { force: true });
+    if (u && u.tag) tag = u.tag;
+  } catch (e) {
+    console.warn("User fetch failed, using fallback mention");
+  }
+  // --------------------------------------------
+
+  return interaction.reply({
+    content: `🟢 **${tag}** has been pardoned.\n📝 ${reason}`
+  });
+}
 
     // /banlist
     if (cmd === 'banlist') {
