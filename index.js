@@ -203,7 +203,45 @@ async function readRange(sheetTitle, range = 'A1:Z1000') {
   }
 }
 
-// ------------------- In-memory storage (no JSON) -------------------
+// ---------- Safe date helpers ----------
+function safeParseDate(value) {
+  if (!value && value !== 0) return null;
+  if (value instanceof Date) return isNaN(value.getTime()) ? null : value;
+
+  const s = String(value).trim();
+  if (!s) return null;
+
+  let d = new Date(s);
+  if (!isNaN(d.getTime())) return d;
+
+  d = new Date(s.replace(" ", "T"));
+  if (!isNaN(d.getTime())) return d;
+
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (m) {
+    d = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 0, 0, 0);
+    if (!isNaN(d.getTime())) return d;
+  }
+
+  return null;
+}
+
+function safeToISOStringMaybe(value) {
+  const d = safeParseDate(value);
+  return d ? d.toISOString() : null;
+}
+
+function safeToMalaysiaDisplay(value) {
+  const d = safeParseDate(value);
+  if (!d) return "—";
+  return d.toLocaleString("en-GB", {
+    timeZone: "Asia/Kuala_Lumpur",
+    hour12: false,
+  });
+}
+
+
+// ------------------- In-memory storage -------------------
 // We'll keep bans, warnings, keywords, VC active sessions, VC aggregates, VC logs, monthly summaries in memory.
 // On startup we will load existing rows from Sheets into these structures.
 
@@ -241,8 +279,8 @@ function ensureAggregate(gid, uid) {
 async function loadBanListFromSheet() {
   const rows = await readRange('BanList', 'A2:G10000');
   for (const r of rows) {
-    // Expect: guildId | userId | username | moderator | reason | banType | at
-    const userId = r[1];
+    // Expect: Guild ID | User ID | Username | Moderator | Reason | BanType | Logged At
+    const userId = r[1]; // 
     if (userId) bannedUsers.add(userId);
   }
   console.log(`[Sheets] Loaded ${bannedUsers.size} bans into memory.`);
@@ -266,46 +304,87 @@ async function loadKeywordsFromSheet() {
 
 // Load VC_Members and VC_Sessions into memory to build aggregates and historical logs
 async function loadVCDataFromSheets() {
-  // Load vcSessions
-  const sessions = await readRange('VC_Sessions', 'A4:Z10000'); // data starts row 4
-  vcLogsArchive = [];
-  for (const r of sessions) {
-    // we expect: LoggedAt(MYT), guildId, channelId, channelName, sessionStart(MYT), sessionEnd(MYT), durationMs, totalMembers
-    if (!r[1]) continue;
-    const summary = {
-      guildId: r[1],
-      channelId: r[2],
-      channelName: r[3],
-      start: new Date(r[4]).toISOString ? (new Date(r[4]).toISOString()) : new Date(r[4]).toISOString(),
-      end: new Date(r[5]).toISOString ? (new Date(r[5]).toISOString()) : new Date(r[5]).toISOString(),
-      durationMs: Number(r[6] || 0),
-      totalMembers: Number(r[7] || 0),
-      members: []
-    };
-    vcLogsArchive.push(summary);
-  }
+  try {
+    const sheets = getSheetsClient();
+    if (!sheets) {
+      console.warn('[Sheets] No Sheets client, skipping load.');
+      return;
+    }
 
-  // Load members
-  const members = await readRange('VC_Members', 'A4:Z50000');
-  for (const r of members) {
-    // LoggedAt, guildId, channelId, userId, usernameTag, timeMs, rejoinCount, sessionStart, sessionEnd
-    const gid = r[1];
-    const cid = r[2];
-    const uid = r[3];
-    const tag = r[4] || `<@${uid}>`;
-    const ms = Number(r[5] || 0);
-    const rejoinCount = Number(r[6] || 0);
-    if (!gid || !uid) continue;
-    const agg = ensureAggregate(gid, uid);
-    agg.lifetimeMs = (agg.lifetimeMs || 0) + ms;
-    // weekly/monthly maps not reconstructed here (we could parse sessionStart to add to month/week buckets)
-    // but we will not reconstruct weekly/monthly buckets perfectly from member rows to keep startup simple.
-  }
+    // =============================
+    // LOAD VC_Members
+    // =============================
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: 'VC_Members!A4:Z', // skip title/header rows
+    });
 
-  // Build aggregates more thoroughly by iterating vcLogsArchive if members included (but our VC_Sessions load above does not have members)
-  // If you want perfect reconstruction, store members inside VC_Sessions or a JSON blob. For now we keep lifetimeMs aggregated from VC_Members.
-  console.log(`[Sheets] Loaded ${vcLogsArchive.length} VC sessions (master rows) and built basic aggregates.`);
+    const rows = res.data.values || [];
+
+    console.log(`[Sheets] Loading VC_Members: ${rows.length} rows`);
+
+    for (const [i, row] of rows.entries()) {
+      const guildId = row[1];
+      const userId  = row[3];
+      if (!guildId || !userId) continue;
+
+      const ms = Number(row[5] || 0);
+
+      const endDate = safeParseDate(row[8]); // sessionEnd
+      const safeEnd = endDate || new Date();
+
+      const wkKey = getYearWeek(safeEnd);
+      const moKey = getYearMonth(safeEnd);
+
+      const agg = ensureAggregate(guildId, userId);
+      agg.lifetimeMs += ms;
+      agg.weekly[wkKey]  = (agg.weekly[wkKey]  || 0) + ms;
+      agg.monthly[moKey] = (agg.monthly[moKey] || 0) + ms;
+    }
+
+    console.log(`[Sheets] VC_Members loaded.`);
+
+    // =============================
+    // LOAD VC_Sessions
+    // =============================
+    const sessions = await readRange('VC_Sessions', 'A4:Z10000');
+
+    vcLogsArchive = [];
+
+    for (const row of sessions) {
+      if (!row[1]) continue; // guildId required
+
+      const guildId     = row[1];
+      const channelId   = row[2];
+      const channelName = row[3];
+      const startIso    = safeToISOStringMaybe(row[4]);
+      const endIso      = safeToISOStringMaybe(row[5]);
+      const durationMs  = Number(row[6] || 0);
+      const totalMembers = Number(row[7] || 0);
+
+      const start = safeParseDate(startIso) || new Date();
+      const end   = safeParseDate(endIso)   || new Date();
+
+      vcLogsArchive.push({
+        guildId,
+        channelId,
+        channelName,
+        start: start.toISOString(),
+        end: end.toISOString(),
+        durationMs,
+        totalMembers,
+        members: [] // members are in VC_Members sheet
+      });
+    }
+
+    console.log(`[Sheets] Loaded ${vcLogsArchive.length} VC sessions.`);
+
+  } catch (e) {
+    console.error('[Sheets] loadVCDataFromSheets ERROR:', e);
+  }
 }
+
+
 
 // Load warn list for warnings history (WarnList!A:G)
 async function loadWarnsFromSheet() {
@@ -356,21 +435,25 @@ async function loadAllFromSheets() {
 
 // ------------------- Logging to Sheets (write functions) -------------------
 
-async function appendBanToSheet(guild, targetUser, moderatorUser, reason, type) {
+async function logBanEventToSheet(guild, targetUser, moderatorUser, reason, type) {
   const sheets = getSheetsClient();
   if (!sheets) return;
+
   try {
     const row = [
-      toMalaysiaTimeIso(new Date()),
       guild?.id || 'unknown',
       targetUser?.id || 'unknown',
       targetUser?.tag || 'unknown',
       moderatorUser?.tag || 'unknown',
       reason || '',
-      type || '',
+      type || 'BAN',
+      toMalaysiaTimeIso(new Date())
     ];
-    await appendAndSort('BanList', [row], 0);
-  } catch (e) { console.error('[Sheets] appendBanToSheet', e); }
+
+    await appendAndSort('BanList', [row], 6);
+  } catch (e) {
+    console.error('[Sheets] logBanEventToSheet error:', e);
+  }
 }
 
 async function logWarnEventToSheet(guild, targetUser, moderatorUser, reason, count) {
@@ -467,6 +550,7 @@ async function saveSessionToGoogleSheets(summaryObj) {
       for (const m of members) {
         const agg = ensureAggregate(guildId, m.uid);
         agg.lifetimeMs = (agg.lifetimeMs || 0) + (m.ms || 0);
+        agg.tag = m.tag;
         const wk = getYearWeek(new Date());
         const mo = getYearMonth(new Date());
         agg.weekly[wk] = (agg.weekly[wk] || 0) + (m.ms || 0);
@@ -686,14 +770,22 @@ function handleVCJoin(guild, channel, user) {
     const session = ensureActiveSession(gid, cid);
     let part = session.participants[user.id];
     const isRejoin = !!part;
-    if (!part) {
-      part = { totalMs: 0, currentJoinTs: now, rejoinCount: 0, firstJoinTs: now, lastLeaveTs: null };
-      session.participants[user.id] = part;
-      if (!session.joinedOrder.includes(user.id)) session.joinedOrder.push(user.id);
-    } else {
-      part.currentJoinTs = now;
-      part.rejoinCount = (part.rejoinCount || 0) + 1;
-    }
+if (!part) {
+  part = {
+    totalMs: 0,
+    currentJoinTs: now,
+    rejoinCount: 0,
+    firstJoinTs: now,
+    lastLeaveTs: null,
+    tag: user.tag // ← store initial tag
+  };
+  session.participants[user.id] = part;
+  if (!session.joinedOrder.includes(user.id)) session.joinedOrder.push(user.id);
+} else {
+  part.currentJoinTs = now;
+  part.rejoinCount = (part.rejoinCount || 0) + 1;
+  part.tag = user.tag; // update tag on rejoin as name may change
+}
     // admin log
     const joinEmbed = new EmbedBuilder()
       .setTitle(isRejoin ? '🔁 VC Rejoin' : '✅ VC Join')
@@ -715,18 +807,20 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
     const part = session.participants[user.id];
     let thisSessionMs = 0;
     if (part && part.currentJoinTs) {
-      const delta = now - part.currentJoinTs;
-      part.totalMs = (part.totalMs || 0) + delta;
-      part.currentJoinTs = null;
-      part.lastLeaveTs = now;
-      thisSessionMs = part.totalMs || 0;
-      const agg = ensureAggregate(gid, user.id);
-      agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
-      const wk = getYearWeek(new Date());
-      const mo = getYearMonth(new Date());
-      agg.weekly[wk] = (agg.weekly[wk] || 0) + delta;
-      agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
-    }
+  const delta = now - part.currentJoinTs;
+  part.totalMs = (part.totalMs || 0) + delta;
+  part.currentJoinTs = null;
+  part.lastLeaveTs = now;
+  thisSessionMs = part.totalMs || 0;
+  const agg = ensureAggregate(gid, user.id);
+  agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
+  // store tag safely from the participant or user object
+  agg.tag = part.tag || user.tag || agg.tag || null;
+  const wk = getYearWeek(new Date());
+  const mo = getYearMonth(new Date());
+  agg.weekly[wk] = (agg.weekly[wk] || 0) + delta;
+  agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
+}
 
     // admin leave embed
     const ch = oldChannel;
@@ -745,32 +839,48 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
     if (ch && ch.members && ch.members.size === 0) {
       // finalize all participants
       for (const [uid, p] of Object.entries(session.participants)) {
-        if (p.currentJoinTs) {
-          const delta = now - p.currentJoinTs;
-          p.totalMs = (p.totalMs || 0) + delta;
-          p.currentJoinTs = null;
-          p.lastLeaveTs = now;
-          const agg = ensureAggregate(gid, uid);
-          agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
-          const wk = getYearWeek(new Date());
-          const mo = getYearMonth(new Date());
-          agg.weekly[wk] = (agg.weekly[wk] || 0) + delta;
-          agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
-        }
-      }
+  if (p.currentJoinTs) {
+    const delta = now - p.currentJoinTs;
+    p.totalMs = (p.totalMs || 0) + delta;
+    p.currentJoinTs = null;
+    p.lastLeaveTs = now;
+    const agg = ensureAggregate(gid, uid);
+    // safe tag assignment: prefer p.tag, fall back to existing agg.tag
+    agg.tag = p.tag || agg.tag || null;
+    agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
+    const wk = getYearWeek(new Date());
+    const mo = getYearMonth(new Date());
+    agg.weekly[wk] = (agg.weekly[wk] || 0) + delta;
+    agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
+  }
+}
 
       const start = new Date(session.startTs);
       const end   = new Date();
       const membersSummary = [];
       let totalMs = 0;
       for (const uid of session.joinedOrder) {
-        const p = session.participants[uid];
-        if (!p) continue;
-        totalMs += p.totalMs || 0;
-        let tag = `<@${uid}>`;
-        try { const u = await client.users.fetch(uid).catch(()=>null); if (u && u.tag) tag = u.tag; } catch {}
-        membersSummary.push({ uid, tag, ms: p.totalMs || 0, rejoinCount: p.rejoinCount || 0, firstJoinTs: p.firstJoinTs || session.startTs, lastLeaveTs: p.lastLeaveTs || end.getTime() });
-      }
+  const p = session.participants[uid];
+  if (!p) continue;
+  totalMs += p.totalMs || 0;
+  // Prefer participant-stored tag; fallback to fetching or mention
+  let displayTag = p.tag || null;
+  if (!displayTag) {
+    try {
+      const u = await client.users.fetch(uid).catch(()=>null);
+      if (u && u.tag) displayTag = u.tag;
+    } catch {}
+  }
+  if (!displayTag) displayTag = `<@${uid}>`;
+  membersSummary.push({
+    uid,
+    tag: displayTag,
+    ms: p.totalMs || 0,
+    rejoinCount: p.rejoinCount || 0,
+    firstJoinTs: p.firstJoinTs || session.startTs,
+    lastLeaveTs: p.lastLeaveTs || end.getTime()
+  });
+}
 
       const summaryObj = {
         guildId: gid,
@@ -989,7 +1099,7 @@ client.on('interactionCreate', async (interaction) => {
           await user.send({ embeds: [banDM] }).catch(()=>{});
         } catch {}
         await interaction.reply({ content: `🚫 Banned **${user.tag}**. 📝 ${reason}` });
-        await appendBanToSheet(guild, user, interaction.user, reason, 'MANUAL');
+        await logBanEventToSheet(guild, user, interaction.user, reason, 'MANUAL');
       } catch (e) {
         console.error('ban error', e);
         await interaction.reply({ content: '⚠️ Could not ban that user — check my role position & permissions.' });
@@ -1111,7 +1221,10 @@ client.on('interactionCreate', async (interaction) => {
       const summary = guildSummaries[key];
       // create embed file
       const embed = new EmbedBuilder().setTitle(`📅 Monthly VC Summary — ${guild.name} — ${summary.key}`).setDescription([`**Period:** ${formatMYTTime(new Date(summary.start))} — ${formatMYTTime(new Date(summary.end))}`, `**Generated:** ${formatMYTTime(new Date(summary.generatedAt))}`, `**Total sessions:** ${summary.totalSessions}`, `**Total voice time (sum):** ${msToHMS(summary.totalMs)}`, '', '**Member breakdown:**'].join('\n')).setColor(0x1abc9c).setTimestamp();
-      const lines = summary.members.map(m => `${m.uid ? `<@${m.uid}>` : m.tag} — ${msToHMS(m.ms)} (${m.sessions} sessions, ${m.rejoinCount || 0} rejoins)`);
+      const lines = summary.members.map(m => {
+  const name = m.tag || (m.uid ? `<@${m.uid}>` : 'Unknown');
+  return `${name} — ${msToHMS(m.ms)} (${m.sessions} sessions, ${m.rejoinCount || 0} rejoins)`;
+});
       const fullText = lines.join('\n');
       embed.addFields({ name: 'Top members', value: fullText.slice(0, 1000) || '_No data_' });
       return interaction.reply({ embeds: [embed] });
@@ -1126,20 +1239,48 @@ client.on('interactionCreate', async (interaction) => {
 // Monthly summary builder (generate from vcLogsArchive)
 function buildMonthlySummaryForKey(guildId, key) {
   const { start, end } = monthRangeForKey(key);
-  const sessions = (vcLogsArchive || []).filter(s => s.guildId === guildId && new Date(s.end) >= start && new Date(s.end) <= end);
+  const sessions = (vcLogsArchive || []).filter(
+    s => s.guildId === guildId &&
+    new Date(s.end) >= start &&
+    new Date(s.end) <= end
+  );
+
   const perUser = {};
   let totalMs = 0;
+
   for (const s of sessions) {
     for (const m of s.members || []) {
-      if (!perUser[m.uid]) perUser[m.uid] = { ms: 0, sessions: 0, rejoinCount: 0 };
+      if (!perUser[m.uid]) {
+        perUser[m.uid] = { ms: 0, sessions: 0, rejoinCount: 0 };
+      }
       perUser[m.uid].ms += (m.ms || 0);
       perUser[m.uid].sessions += 1;
       perUser[m.uid].rejoinCount += (m.rejoinCount || 0);
       totalMs += (m.ms || 0);
     }
   }
-  const members = Object.entries(perUser).map(([uid,v]) => ({ uid, ms: v.ms, sessions: v.sessions, rejoinCount: v.rejoinCount })).sort((a,b)=>b.ms-a.ms);
-  return { key, guildId, start: start.toISOString(), end: end.toISOString(), generatedAt: new Date().toISOString(), totalSessions: sessions.length, totalMs, members };
+
+  // ✅ FIXED: Correct JS syntax, includes tag fallback
+  const members = Object.entries(perUser)
+    .map(([uid, v]) => ({
+      uid,
+      tag: vcAggregates[guildId]?.[uid]?.tag || null,
+      ms: v.ms,
+      sessions: v.sessions,
+      rejoinCount: v.rejoinCount
+    }))
+    .sort((a, b) => b.ms - a.ms);
+
+  return {
+    key,
+    guildId,
+    start: start.toISOString(),
+    end: end.toISOString(),
+    generatedAt: new Date().toISOString(),
+    totalSessions: sessions.length,
+    totalMs,
+    members
+  };
 }
 
 async function postAndSaveMonthlySummary(guild, summary) {
@@ -1223,33 +1364,49 @@ client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   // load sheets into memory (if available)
   await loadAllFromSheets();
-  // Sync bans from Discord to memory and sheets
-  for (const [, guild] of client.guilds.cache) {
-    try {
-      const bans = await guild.bans.fetch().catch(()=>new Map());
-      for (const [id] of bans) bannedUsers.add(id);
-      // sync missing bans to sheet
-      if (bans.size) {
-        // use getExistingBanIdsFromSheet? We'll just append missing ones.
-        // Read existing sheet IDs
-        const existingRows = await readRange('BanList','A2:G5000');
-        const existingSet = new Set(existingRows.map(r=>r[2]));
+  // Sync bans from Discord to memory and Google Sheets
+  try {
+    const existingRows = await readRange("BanList", "A2:G5000");
+    const existingSet = new Set(existingRows.map(r => r[1])); // User ID column (index 1)
+
+    for (const [, guild] of client.guilds.cache) {
+      try {
+        const bans = await guild.bans.fetch().catch(() => new Map());
         const rowsToAdd = [];
+
         for (const [, ban] of bans) {
-          const user = ban.user; if (!user) continue;
+          const user = ban.user;
+          if (!user || !user.id) continue;
+          // keep memory in sync
+          bannedUsers.add(user.id);
+
+          // add only if missing in sheet
           if (!existingSet.has(user.id)) {
-            rowsToAdd.push([toMalaysiaTimeIso(new Date()), guild.id, user.id, user.tag, 'SYSTEM (startup sync)', ban.reason || 'No reason', 'Startup Sync']);
-            bannedUsers.add(user.id);
+            rowsToAdd.push([
+              guild.id,                        // Guild ID
+              user.id,                         // User ID
+              user.tag || '',                  // Username
+              "SYSTEM (startup sync)",         // Moderator
+              ban.reason || "No reason",       // Reason
+              "Startup Sync",                  // BanType / Note
+              toMalaysiaTimeIso(new Date())    // Logged At
+            ]);
           }
         }
-        if (rowsToAdd.length) {
-          for (const r of rowsToAdd) await appendAndSort('BanList', [r], 0);
-          console.log(`[Sheets] Synced ${rowsToAdd.length} startup bans to BanList`);
-        }
-      }
-    } catch (e) { console.warn('Failed to sync bans for', guild?.name, e?.message || e); }
-  }
 
+        if (rowsToAdd.length > 0) {
+          for (const r of rowsToAdd) {
+            await appendAndSort("BanList", [r], 6); // sort by Logged At column
+          }
+          console.log(`[Sheets] Synced ${rowsToAdd.length} startup bans for guild ${guild.name}`);
+        }
+      } catch (innerErr) {
+        console.warn("Failed to sync bans for", guild?.name, innerErr?.message || innerErr);
+      }
+    }
+  } catch (err) {
+    console.warn("Ban sync startup failed:", err?.message || err);
+  }
   // presence rotation
   setRandomPresence();
   setInterval(setRandomPresence, 10 * 60 * 1000);
