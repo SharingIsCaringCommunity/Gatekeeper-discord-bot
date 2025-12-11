@@ -12,6 +12,6 @@
   "dependencies": {
     "discord.js": "^14.16.3",
     "express": "^4.19.2",
-    "googleapis": "^121.0.0"
+    "googleapis": "^131.0.0"
   }
 }
