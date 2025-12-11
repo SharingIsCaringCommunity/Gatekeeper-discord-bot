@@ -779,20 +779,33 @@ function setRandomPresence() {
 }
 
 // ---------- VC Tracking internals ----------
-const VC_STATS_CHANNEL_ID = process.env.VC_STATS_CHANNEL || STATS_CHANNEL;
-const VC_LOG_CHANNEL_ID   = process.env.VC_LOG_CHANNEL || LOG_CHANNEL;
+const VC_LOG_CHANNEL_ID   = "1448175121289187429"; // ADMIN logs only
+const VC_STATS_CHANNEL_ID = "1448177256584314982"; // PUBLIC stats only
 
 function getAdminVCLogChannel(guild) {
   return guild.channels.cache.get(VC_LOG_CHANNEL_ID) || null;
 }
+
 function getPublicVCStatsChannel(guild) {
   return guild.channels.cache.get(VC_STATS_CHANNEL_ID) || null;
 }
+
 async function sendVCAdminLog(guild, embed) {
-  try { const ch = getAdminVCLogChannel(guild); if (ch) await ch.send({ embeds: [embed] }).catch(()=>{}); } catch (e) { console.error('[VC] admin send error', e); }
+  try {
+    const ch = guild.channels.cache.get(VC_LOG_CHANNEL_ID);
+    if (ch) await ch.send({ embeds: [embed] });
+  } catch (e) {
+    console.error("[VC] Failed sending admin log:", e);
+  }
 }
+
 async function sendVCPublicLog(guild, embed) {
-  try { const ch = getPublicVCStatsChannel(guild); if (ch) await ch.send({ embeds: [embed] }).catch(()=>{}); } catch (e) { console.error('[VC] public send error', e); }
+  try {
+    const ch = guild.channels.cache.get(VC_STATS_CHANNEL_ID);
+    if (ch) await ch.send({ embeds: [embed] });
+  } catch (e) {
+    console.error("[VC] Failed sending public log:", e);
+  }
 }
 
 function handleVCJoin(guild, channel, user) {
