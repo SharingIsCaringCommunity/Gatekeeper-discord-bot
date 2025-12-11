@@ -13,6 +13,12 @@ const express = require('express');
 const { google } = require('googleapis');
 const process = require('process');
 
+// ----- Ensure fetch exists (Railway sometimes lacks global fetch) -----
+if (typeof fetch !== "function") {
+  global.fetch = (...args) =>
+    import("node-fetch").then(({ default: fetch }) => fetch(...args));
+}
+
 // ------------------- ENV -------------------
 const TOKEN         = process.env.DISCORD_TOKEN;
 const LOG_CHANNEL   = process.env.LOG_CHANNEL;
@@ -369,7 +375,7 @@ async function loadVCDataFromSheets() {
         guildId,
         channelId,
         channelName,
-        start: start.toISOString(),
+        start: new Date(session.startTs).toISOString(),
         end: end.toISOString(),
         durationMs,
         totalMembers,
@@ -855,7 +861,6 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
   }
 }
 
-      const start = new Date(session.startTs);
       const end   = new Date();
       const membersSummary = [];
       let totalMs = 0;
@@ -1431,10 +1436,25 @@ process.on('uncaughtException', console.error);
 // express keepalive
 const app = express();
 const PORT = process.env.PORT || 3000;
+
 app.get('/', (_req, res) => res.send('🟢 BusyPang (Sheets) is running.'));
 app.listen(PORT, () => console.log(`✅ Web server running on port ${PORT}`));
 
-// login
-client.login(TOKEN).catch(err => { console.error('Failed to login:', err); process.exit(1); });
+// keep Railway awake
+setInterval(() => {
+  try {
+    fetch(`https://${process.env.RAILWAY_STATIC_URL || "localhost"}/`)
+      .then(() => console.log("🔁 Self-ping OK"))
+      .catch(() => console.warn("⚠️ Self-ping failed"));
+  } catch (e) {
+    console.warn("Self-ping error:", e);
+  }
+}, 25000);
+
+// login 
+client.login(TOKEN).catch(err => { 
+  console.error('Failed to login:', err); 
+  process.exit(1); 
+});
 
 // ------------------- End of file -------------------
