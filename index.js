@@ -179,19 +179,26 @@ async function ensureSheetExists(sheetTitle, headerRow = [], headerNote = '') {
   }
 }
 
+async function getSheetId(title) {
+  const sheets = getSheetsClient();
+  if (!sheets) return null;
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+  const sheet = (meta.data.sheets || []).find(s => s.properties.title === title);
+  return sheet ? sheet.properties.sheetId : null;
+}
+
+// Remove ban(s) by userId from BanList sheet (single, central implementation)
 async function removeBanFromSheet(userId) {
   const sheets = getSheetsClient();
   if (!sheets) return;
 
   try {
-    // Ensure sheet exists
-    const banSheetId = await getSheetId("BanList");
-    if (!banSheetId) {
+    const sheetId = await getSheetId("BanList");
+    if (!sheetId) {
       console.warn("[Sheets] BanList sheet missing, cannot delete row.");
       return;
     }
 
-    // Fetch rows starting from row 3
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: GOOGLE_SHEET_ID,
       range: "BanList!A3:G10000"
@@ -199,15 +206,15 @@ async function removeBanFromSheet(userId) {
 
     const rows = res.data.values || [];
     const deleteRequests = [];
-    let rowIndex = 3; // actual sheet row index
+    let rowIndex = 3;
 
     for (const row of rows) {
-      const sheetUserId = row[1]; // user ID column
+      const sheetUserId = row[1];
       if (sheetUserId === userId) {
         deleteRequests.push({
           deleteDimension: {
             range: {
-              sheetId: banSheetId,
+              sheetId: sheetId,
               dimension: "ROWS",
               startIndex: rowIndex - 1,
               endIndex: rowIndex
@@ -231,14 +238,7 @@ async function removeBanFromSheet(userId) {
   }
 }
 
-async function getSheetId(title) {
-  const sheets = getSheetsClient();
-  const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
-  const sheet = meta.data.sheets.find(s => s.properties.title === title);
-  return sheet.properties.sheetId;
-}
-
-// Append and auto-sort (sort by column index; 0 == first data column we use 'Logged At')
+// Append and auto-sort (sort by column index; 0 == first data column 'Logged At')
 async function appendAndSort(sheetTitle, rows, sortColumnIndex = 0) {
   const sheets = getSheetsClient();
   if (!sheets) {
@@ -475,6 +475,7 @@ async function loadVCDataFromSheets() {
   }
 
 }
+
 async function removeWarnsFromSheet(userId, guildId) {
   const sheets = getSheetsClient();
   if (!sheets) return;
@@ -547,11 +548,11 @@ async function loadAllFromSheets() {
 
   // Now load data
   await Promise.all([
-  loadBanListFromSheet(),
-  loadKeywordsFromSheet(),
-  loadVCDataFromSheets(),
-  loadMonthlySummariesFromSheet()
-]);
+    loadBanListFromSheet(),
+    loadKeywordsFromSheet(),
+    loadVCDataFromSheets(),
+    loadMonthlySummariesFromSheet()
+  ]);
 }
 
 // ------------------- Logging to Sheets (write functions) -------------------
@@ -573,7 +574,7 @@ async function logBanEventToSheet(guild, targetUser, moderatorUser, reason, type
 
     await appendAndSort('BanList', [row], 6);
   } catch (e) {
-    console.error('[Sheets] logBanEventToSheet error:', e);
+    console.error('[Sheets] logBanEventToSheet error', e);
   }
 }
 
@@ -1241,40 +1242,40 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-if (cmd === 'pardon') {
-  if (!isAdmin(interaction)) 
-    return interaction.reply({ content: '⛔ Admin only.' });
+    if (cmd === 'pardon') {
+      if (!isAdmin(interaction)) 
+        return interaction.reply({ content: '⛔ Admin only.' });
 
-  const userId = interaction.options.getString('userid');
-  const reason = interaction.options.getString('reason') || 'Pardoned by admin';
+      const userId = interaction.options.getString('userid');
+      const reason = interaction.options.getString('reason') || 'Pardoned by admin';
 
-  // Remove from in-memory ban list
-  bannedUsers.delete(userId);
+      // Remove from in-memory ban list
+      bannedUsers.delete(userId);
 
-  // Remove from sheet
-  await removeBanFromSheet(userId).catch(()=>{});
-  await removeWarnsFromSheet(userId, guild.id).catch(()=>{});
+      // Remove from sheet
+      await removeBanFromSheet(userId).catch(()=>{});
+      await removeWarnsFromSheet(userId, guild.id).catch(()=>{});
 
-  // Safe unban
-  try {
-    const bans = await guild.bans.fetch();
-if (bans.has(userId)) {
-    await guild.bans.remove(userId);
-}
-  } catch (e) {
-    console.warn("Unban skipped:", e);
-  }
+      // Safe unban
+      try {
+        const bans = await guild.bans.fetch();
+        if (bans.has(userId)) {
+          await guild.bans.remove(userId);
+        }
+      } catch (e) {
+        console.warn("Unban skipped:", e);
+      }
 
-  let tag = userId;
-  try {
-    const u = await client.users.fetch(userId);
-    if (u && u.tag) tag = u.tag;
-  } catch {}
+      let tag = userId;
+      try {
+        const u = await client.users.fetch(userId);
+        if (u && u.tag) tag = u.tag;
+      } catch {}
 
-  return interaction.reply({
-    content: `🟢 **${tag}** has been pardoned.\n📝 ${reason}`
-  });
-}
+      return interaction.reply({
+        content: `🟢 **${tag}** has been pardoned.\n📝 ${reason}`
+      });
+    }
 
     // /banlist
     if (cmd === 'banlist') {
@@ -1513,49 +1514,7 @@ client.once('ready', async () => {
   console.log(`✅ Logged in as ${client.user.tag}`);
   // load sheets into memory (if available)
   await loadAllFromSheets();
-  // Sync bans from Discord to memory and Google Sheets
-  try {
-    const existingRows = await readRange("BanList", "A2:G5000");
-    const existingSet = new Set(existingRows.map(r => r[1])); // User ID column (index 1)
 
-    for (const [, guild] of client.guilds.cache) {
-      try {
-        const bans = await guild.bans.fetch().catch(() => new Map());
-        const rowsToAdd = [];
-
-        for (const [, ban] of bans) {
-          const user = ban.user;
-          if (!user || !user.id) continue;
-          // keep memory in sync
-          bannedUsers.add(user.id);
-
-          // add only if missing in sheet
-          if (!existingSet.has(user.id)) {
-            rowsToAdd.push([
-              guild.id,
-              user.id,
-              user.tag || '',
-              "SYSTEM (startup sync)",
-              ban.reason || "No reason",
-              "Startup Sync",
-              toMalaysiaTimeIso(new Date())
-            ]);
-          }
-        }
-
-        if (rowsToAdd.length > 0) {
-          for (const r of rowsToAdd) {
-            await appendAndSort("BanList", [r], 6);
-          }
-          console.log(`[Sheets] Synced ${rowsToAdd.length} startup bans for guild ${guild.name}`);
-        }
-      } catch (innerErr) {
-        console.warn("Failed to sync bans for", guild?.name, innerErr?.message || innerErr);
-      }
-    }
-  } catch (err) {
-    console.warn("Ban sync startup failed:", err?.message || err);
-  }
   // presence rotation
   setRandomPresence();
   setInterval(setRandomPresence, 10 * 60 * 1000);
