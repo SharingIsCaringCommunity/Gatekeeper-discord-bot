@@ -1,7 +1,7 @@
 // index.js (single-file BusyPang with Google Sheets only storage)
 // Requirements: Node >=18, discord.js v14.x, express, googleapis
 // Env (required): DISCORD_TOKEN, LOG_CHANNEL, STATS_CHANNEL, GOOGLE_CLIENT_EMAIL, GOOGLE_PRIVATE_KEY, GOOGLE_SHEET_ID
-// Optional: RULES_LINK, VERIFIED_ROLE_ID, FORCE_FETCH_MEMBERS ('true'|'false'), VC_LOG_CHANNEL, VC_STATS_CHANNEL, ROLE_ID_1...ROLE_ID_15
+// Optional: RULES_LINK, VERIFIED_ROLE_ID, FORCE_FETCH_MEMBERS ('true'|'false'), VC_LOG_CHANNEL, VC_STATS_CHANNEL, ROLE_ID_1...ROLE_ID_15, RAILWAY_STATIC_URL
 
 const {
   Client,
@@ -42,22 +42,31 @@ if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !GOOGLE_SHEET_ID) {
 // ------------------- Google Sheets helper -------------------
 let sheetsClient = null;
 function getSheetsClient() {
-  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !GOOGLE_SHEET_ID) return null;
+  if (!GOOGLE_CLIENT_EMAIL || !GOOGLE_PRIVATE_KEY || !GOOGLE_SHEET_ID) {
+    // Sheets not configured
+    return null;
+  }
   if (sheetsClient) return sheetsClient;
-  const auth = new google.auth.JWT(
-    GOOGLE_CLIENT_EMAIL,
-    null,
-    GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-    ['https://www.googleapis.com/auth/spreadsheets']
-  );
-  sheetsClient = google.sheets({ version: 'v4', auth });
-  return sheetsClient;
+  try {
+    const auth = new google.auth.JWT(
+      GOOGLE_CLIENT_EMAIL,
+      null,
+      // Replace literal "\n" sequences with real newlines (for env var formatting)
+      GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+      ['https://www.googleapis.com/auth/spreadsheets']
+    );
+    sheetsClient = google.sheets({ version: 'v4', auth });
+    return sheetsClient;
+  } catch (e) {
+    console.error('[Sheets] getSheetsClient error', e?.message || e);
+    return null;
+  }
 }
 
 // Helper to format Malaysia time human-readable
 function toMalaysiaTimeIso(date) {
   const d = (date instanceof Date) ? date : new Date(date);
-  // e.g. "2025-12-11 23:59:59 (MYT)"
+  // e.g. "2025-12-11 23:59:59"
   const local = d.toLocaleString('en-GB', { timeZone: 'Asia/Kuala_Lumpur', hour12: false });
   return local;
 }
@@ -65,10 +74,25 @@ function toIso(date) {
   return (date instanceof Date ? date : new Date(date)).toISOString();
 }
 
+// converts 0-indexed column to A, B, ... Z, AA, AB, ...
+function columnLetterFromIndex(index) {
+  let s = '';
+  let n = index + 1;
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    s = String.fromCharCode(65 + rem) + s;
+    n = Math.floor((n - 1) / 26);
+  }
+  return s;
+}
+
 // Ensure sheet exists and create headers + title row + formatting
 async function ensureSheetExists(sheetTitle, headerRow = [], headerNote = '') {
   const sheets = getSheetsClient();
-  if (!sheets) return null;
+  if (!sheets) {
+    console.warn('[Sheets] ensureSheetExists skipped — Sheets client not available.');
+    return null;
+  }
   try {
     const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
     const found = (meta.data.sheets || []).find(s => s.properties && s.properties.title === sheetTitle);
@@ -95,7 +119,7 @@ async function ensureSheetExists(sheetTitle, headerRow = [], headerNote = '') {
     values.push(['']); // spacer row
     values.push(headerRow);
 
-    const endCol = String.fromCharCode(65 + Math.max(0, headerRow.length - 1));
+    const endCol = columnLetterFromIndex(Math.max(0, headerRow.length - 1));
     await sheets.spreadsheets.values.update({
       spreadsheetId: GOOGLE_SHEET_ID,
       range: `${sheetTitle}!A1:${endCol}3`,
@@ -158,7 +182,10 @@ async function ensureSheetExists(sheetTitle, headerRow = [], headerNote = '') {
 // Append and auto-sort (sort by column index; 0 == first data column we use 'Logged At')
 async function appendAndSort(sheetTitle, rows, sortColumnIndex = 0) {
   const sheets = getSheetsClient();
-  if (!sheets) return;
+  if (!sheets) {
+    console.warn('[Sheets] appendAndSort skipped — Sheets client not available.');
+    return;
+  }
   try {
     await sheets.spreadsheets.values.append({
       spreadsheetId: GOOGLE_SHEET_ID,
@@ -181,7 +208,7 @@ async function appendAndSort(sheetTitle, rows, sortColumnIndex = 0) {
             sheetId,
             startRowIndex: 3,
             startColumnIndex: 0,
-            endColumnIndex: Math.min(40, (sheet.properties.gridProperties && sheet.properties.gridProperties.columnCount) || 40)
+            endColumnIndex: Math.min(200, (sheet.properties.gridProperties && sheet.properties.gridProperties.columnCount) || 40)
           },
           sortSpecs: [{ dimensionIndex: sortColumnIndex, sortOrder: 'DESCENDING' }]
         }
@@ -196,7 +223,10 @@ async function appendAndSort(sheetTitle, rows, sortColumnIndex = 0) {
 // Read a sheet range (returns values)
 async function readRange(sheetTitle, range = 'A1:Z1000') {
   const sheets = getSheetsClient();
-  if (!sheets) return [];
+  if (!sheets) {
+    console.warn('[Sheets] readRange skipped — Sheets client not available.');
+    return [];
+  }
   try {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: GOOGLE_SHEET_ID,
@@ -246,15 +276,11 @@ function safeToMalaysiaDisplay(value) {
   });
 }
 
-
 // ------------------- In-memory storage -------------------
-// We'll keep bans, warnings, keywords, VC active sessions, VC aggregates, VC logs, monthly summaries in memory.
-// On startup we will load existing rows from Sheets into these structures.
-
 const bannedUsers = new Set();
 const warningsByGuild = new Map(); // Map<guildId, Map<userId, count>>
 const keywordsByGuild = new Map(); // Map<guildId, Set<word>>
-let vcActiveSessions = {}; // as previously: vcActiveSessions[gid][cid] = { startTs, participants, joinedOrder }
+let vcActiveSessions = {}; // vcActiveSessions[gid][cid] = { startTs, participants, joinedOrder }
 let vcLogsArchive = []; // array of session summaries
 let vcAggregates = {}; // vcAggregates[gid][uid] = { lifetimeMs, weekly: {}, monthly: {} }
 let vcMonthlySummaries = {}; // vcMonthlySummaries[gid][key] = summary
@@ -286,7 +312,7 @@ async function loadBanListFromSheet() {
   const rows = await readRange('BanList', 'A2:G10000');
   for (const r of rows) {
     // Expect: Guild ID | User ID | Username | Moderator | Reason | BanType | Logged At
-    const userId = r[1]; // 
+    const userId = r[1];
     if (userId) bannedUsers.add(userId);
   }
   console.log(`[Sheets] Loaded ${bannedUsers.size} bans into memory.`);
@@ -297,11 +323,7 @@ async function loadKeywordsFromSheet() {
   const rows = await readRange('Keywords', 'A2:E10000');
   for (const r of rows) {
     const word = r[0];
-    const byId = r[3];
-    // byId may be the userId or guild; we used 'byId' loosely. We'll treat keywords as global across guild, but we store per-guild if byId is numeric guild id.
-    // If you want per-guild keywords, change uploader to include guildId in column.
     if (!word) continue;
-    // store globally for now in key 'global'
     const gset = getGuildKeywords('global');
     gset.add(word.toLowerCase());
   }
@@ -313,7 +335,7 @@ async function loadVCDataFromSheets() {
   try {
     const sheets = getSheetsClient();
     if (!sheets) {
-      console.warn('[Sheets] No Sheets client, skipping load.');
+      console.warn('[Sheets] No Sheets client, skipping VC load.');
       return;
     }
 
@@ -323,7 +345,7 @@ async function loadVCDataFromSheets() {
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: GOOGLE_SHEET_ID,
       range: 'VC_Members!A4:Z', // skip title/header rows
-    });
+    }).catch(() => ({ data: { values: [] } }));
 
     const rows = res.data.values || [];
 
@@ -350,47 +372,49 @@ async function loadVCDataFromSheets() {
 
     console.log(`[Sheets] VC_Members loaded.`);
 
-// =============================
-// LOAD VC_Sessions
-// =============================
-const sessions = await readRange('VC_Sessions', 'A4:Z10000');
+    // =============================
+    // LOAD VC_Sessions
+    // =============================
+    const sessionsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: 'VC_Sessions!A4:Z10000'
+    }).catch(() => ({ data: { values: [] } }));
 
-vcLogsArchive = [];
+    const sessions = sessionsRes.data.values || [];
 
-for (const row of sessions) {
-  if (!row[1]) continue; // guildId required
+    vcLogsArchive = [];
 
-  const guildId     = row[1];
-  const channelId   = row[2];
-  const channelName = row[3];
-  const startIso    = safeToISOStringMaybe(row[4]);
-  const endIso      = safeToISOStringMaybe(row[5]);
-  const durationMs  = Number(row[6] || 0);
-  const totalMembers = Number(row[7] || 0);
+    for (const row of sessions) {
+      if (!row[1]) continue; // guildId required
 
-  const start = safeParseDate(startIso) || new Date();
-  const end   = safeParseDate(endIso)   || new Date();
+      const guildId     = row[1];
+      const channelId   = row[2];
+      const channelName = row[3];
+      const startIso    = safeToISOStringMaybe(row[4]);
+      const endIso      = safeToISOStringMaybe(row[5]);
+      const durationMs  = Number(row[6] || 0);
+      const totalMembers = Number(row[7] || 0);
 
-  vcLogsArchive.push({
-    guildId,
-    channelId,
-    channelName,
-    start: start.toISOString(),   // ✅ FIXED
-    end: end.toISOString(),
-    durationMs,
-    totalMembers,
-    members: [] // Members loaded from VC_Members separately
-  });
-}
+      const start = safeParseDate(startIso) || new Date();
+      const end   = safeParseDate(endIso)   || new Date();
 
-console.log(`[Sheets] Loaded ${vcLogsArchive.length} VC sessions.`);
+      vcLogsArchive.push({
+        guildId,
+        channelId,
+        channelName,
+        start: start.toISOString(),
+        end: end.toISOString(),
+        durationMs,
+        totalMembers,
+        members: [] // Members loaded from VC_Members separately
+      });
+    }
 
+    console.log(`[Sheets] Loaded ${vcLogsArchive.length} VC sessions.`);
   } catch (e) {
     console.error('[Sheets] loadVCDataFromSheets ERROR:', e);
   }
 }
-
-
 
 // Load warn list for warnings history (WarnList!A:G)
 async function loadWarnsFromSheet() {
@@ -409,8 +433,6 @@ async function loadWarnsFromSheet() {
 
 // Load monthly summaries if present (Dashboard not required)
 async function loadMonthlySummariesFromSheet() {
-  // Our implementation stores monthly summaries in sheet VC_Monthly (optional) OR in Dashboard. We'll look for VC_Monthly sheet with CSV lines.
-  // If you wish to store full JSON summaries in a 'VC_MonthLY_JSON' sheet, implement serialization there.
   console.log('[Sheets] Monthly summary loading: none to load by default.');
 }
 
@@ -427,7 +449,7 @@ async function loadAllFromSheets() {
   await ensureSheetExists('Keywords', ['Keyword', 'Action', 'ByTag', 'ById', 'At'], 'Keywords (blocked)');
   await ensureSheetExists('VC_Sessions', ['Logged At (MYT)', 'Guild ID', 'Channel ID', 'Channel Name', 'Session Start (MYT)', 'Session End (MYT)', 'Duration (ms)', 'Total Members'], 'VC Sessions (master)');
   await ensureSheetExists('VC_Members', ['Logged At (MYT)', 'Guild ID', 'Channel ID', 'User ID', 'UsernameTag', 'Time (ms)', 'RejoinCount', 'SessionStart (MYT)', 'SessionEnd (MYT)'], 'VC Members (master)');
-  await ensureSheetExists('Dashboard', ['Metric', 'Value'], 'VC Dashboard (auto-generated)');
+  await ensureSheetExists('Dashboard', ['Metric', 'Guild', 'Sessions', 'TotalTime', 'Generated At'], 'VC Dashboard (auto-generated)');
 
   // Now load data
   await Promise.all([
@@ -497,7 +519,10 @@ async function logKeywordChangeToSheet(action, word, user) {
 // Save VC session + members to master and daily sheets (no JSON)
 async function saveSessionToGoogleSheets(summaryObj) {
   const sheets = getSheetsClient();
-  if (!sheets) return;
+  if (!sheets) {
+    console.warn('[Sheets] saveSessionToGoogleSheets skipped — Sheets client not available.');
+    return;
+  }
   try {
     // ensure masters + daily
     await ensureSheetExists('VC_Sessions', ['Logged At (MYT)', 'Guild ID', 'Channel ID', 'Channel Name', 'Session Start (MYT)', 'Session End (MYT)', 'Duration (ms)', 'Total Members'], 'VC Sessions (master)');
@@ -776,22 +801,22 @@ function handleVCJoin(guild, channel, user) {
     const session = ensureActiveSession(gid, cid);
     let part = session.participants[user.id];
     const isRejoin = !!part;
-if (!part) {
-  part = {
-    totalMs: 0,
-    currentJoinTs: now,
-    rejoinCount: 0,
-    firstJoinTs: now,
-    lastLeaveTs: null,
-    tag: user.tag // ← store initial tag
-  };
-  session.participants[user.id] = part;
-  if (!session.joinedOrder.includes(user.id)) session.joinedOrder.push(user.id);
-} else {
-  part.currentJoinTs = now;
-  part.rejoinCount = (part.rejoinCount || 0) + 1;
-  part.tag = user.tag; // update tag on rejoin as name may change
-}
+    if (!part) {
+      part = {
+        totalMs: 0,
+        currentJoinTs: now,
+        rejoinCount: 0,
+        firstJoinTs: now,
+        lastLeaveTs: null,
+        tag: user.tag // store initial tag
+      };
+      session.participants[user.id] = part;
+      if (!session.joinedOrder.includes(user.id)) session.joinedOrder.push(user.id);
+    } else {
+      part.currentJoinTs = now;
+      part.rejoinCount = (part.rejoinCount || 0) + 1;
+      part.tag = user.tag; // update tag on rejoin as name may change
+    }
     // admin log
     const joinEmbed = new EmbedBuilder()
       .setTitle(isRejoin ? '🔁 VC Rejoin' : '✅ VC Join')
@@ -813,20 +838,19 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
     const part = session.participants[user.id];
     let thisSessionMs = 0;
     if (part && part.currentJoinTs) {
-  const delta = now - part.currentJoinTs;
-  part.totalMs = (part.totalMs || 0) + delta;
-  part.currentJoinTs = null;
-  part.lastLeaveTs = now;
-  thisSessionMs = part.totalMs || 0;
-  const agg = ensureAggregate(gid, user.id);
-  agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
-  // store tag safely from the participant or user object
-  agg.tag = part.tag || user.tag || agg.tag || null;
-  const wk = getYearWeek(new Date());
-  const mo = getYearMonth(new Date());
-  agg.weekly[wk] = (agg.weekly[wk] || 0) + delta;
-  agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
-}
+      const delta = now - part.currentJoinTs;
+      part.totalMs = (part.totalMs || 0) + delta;
+      part.currentJoinTs = null;
+      part.lastLeaveTs = now;
+      thisSessionMs = part.totalMs || 0;
+      const agg = ensureAggregate(gid, user.id);
+      agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
+      agg.tag = part.tag || user.tag || agg.tag || null;
+      const wk = getYearWeek(new Date());
+      const mo = getYearMonth(new Date());
+      agg.weekly[wk] = (agg.weekly[wk] || 0) + delta;
+      agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
+    }
 
     // admin leave embed
     const ch = oldChannel;
@@ -845,48 +869,46 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
     if (ch && ch.members && ch.members.size === 0) {
       // finalize all participants
       for (const [uid, p] of Object.entries(session.participants)) {
-  if (p.currentJoinTs) {
-    const delta = now - p.currentJoinTs;
-    p.totalMs = (p.totalMs || 0) + delta;
-    p.currentJoinTs = null;
-    p.lastLeaveTs = now;
-    const agg = ensureAggregate(gid, uid);
-    // safe tag assignment: prefer p.tag, fall back to existing agg.tag
-    agg.tag = p.tag || agg.tag || null;
-    agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
-    const wk = getYearWeek(new Date());
-    const mo = getYearMonth(new Date());
-    agg.weekly[wk] = (agg.weekly[wk] || 0) + delta;
-    agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
-  }
-}
+        if (p.currentJoinTs) {
+          const delta = now - p.currentJoinTs;
+          p.totalMs = (p.totalMs || 0) + delta;
+          p.currentJoinTs = null;
+          p.lastLeaveTs = now;
+          const agg = ensureAggregate(gid, uid);
+          agg.tag = p.tag || agg.tag || null;
+          agg.lifetimeMs = (agg.lifetimeMs || 0) + delta;
+          const wk = getYearWeek(new Date());
+          const mo = getYearMonth(new Date());
+          agg.weekly[wk] = (agg.weekly[wk] || 0) + delta;
+          agg.monthly[mo] = (agg.monthly[mo] || 0) + delta;
+        }
+      }
 
-      const start = new Date(session.startTs);  
+      const start = new Date(session.startTs);
       const end   = new Date();
       const membersSummary = [];
       let totalMs = 0;
       for (const uid of session.joinedOrder) {
-  const p = session.participants[uid];
-  if (!p) continue;
-  totalMs += p.totalMs || 0;
-  // Prefer participant-stored tag; fallback to fetching or mention
-  let displayTag = p.tag || null;
-  if (!displayTag) {
-    try {
-      const u = await client.users.fetch(uid).catch(()=>null);
-      if (u && u.tag) displayTag = u.tag;
-    } catch {}
-  }
-  if (!displayTag) displayTag = `<@${uid}>`;
-  membersSummary.push({
-    uid,
-    tag: displayTag,
-    ms: p.totalMs || 0,
-    rejoinCount: p.rejoinCount || 0,
-    firstJoinTs: p.firstJoinTs || session.startTs,
-    lastLeaveTs: p.lastLeaveTs || end.getTime()
-  });
-}
+        const p = session.participants[uid];
+        if (!p) continue;
+        totalMs += p.totalMs || 0;
+        let displayTag = p.tag || null;
+        if (!displayTag) {
+          try {
+            const u = await client.users.fetch(uid).catch(()=>null);
+            if (u && u.tag) displayTag = u.tag;
+          } catch {}
+        }
+        if (!displayTag) displayTag = `<@${uid}>`;
+        membersSummary.push({
+          uid,
+          tag: displayTag,
+          ms: p.totalMs || 0,
+          rejoinCount: p.rejoinCount || 0,
+          firstJoinTs: p.firstJoinTs || session.startTs,
+          lastLeaveTs: p.lastLeaveTs || end.getTime()
+        });
+      }
 
       const summaryObj = {
         guildId: gid,
@@ -928,7 +950,7 @@ async function handleVCLeave(oldChannel, newChannel, user, guild) {
       await sendVCAdminLog(guild, adminEmbed);
 
       // public embed
-      const publicTop = membersSummary.sort((a,b)=>b.ms-a.ms).slice(0,5);
+      const publicTop = membersSummary.slice().sort((a,b)=>b.ms-a.ms).slice(0,5);
       const publicLines = publicTop.map((m,i) => {
         const medal = i===0?'🥇':i===1?'🥈':i===2?'🥉':'•';
         return `${medal} ${m.tag} — ${msToHMS(m.ms)}${m.rejoinCount ? ` (rejoins: ${m.rejoinCount})` : ''}`;
@@ -1228,9 +1250,9 @@ client.on('interactionCreate', async (interaction) => {
       // create embed file
       const embed = new EmbedBuilder().setTitle(`📅 Monthly VC Summary — ${guild.name} — ${summary.key}`).setDescription([`**Period:** ${formatMYTTime(new Date(summary.start))} — ${formatMYTTime(new Date(summary.end))}`, `**Generated:** ${formatMYTTime(new Date(summary.generatedAt))}`, `**Total sessions:** ${summary.totalSessions}`, `**Total voice time (sum):** ${msToHMS(summary.totalMs)}`, '', '**Member breakdown:**'].join('\n')).setColor(0x1abc9c).setTimestamp();
       const lines = summary.members.map(m => {
-  const name = m.tag || (m.uid ? `<@${m.uid}>` : 'Unknown');
-  return `${name} — ${msToHMS(m.ms)} (${m.sessions} sessions, ${m.rejoinCount || 0} rejoins)`;
-});
+        const name = m.tag || (m.uid ? `<@${m.uid}>` : 'Unknown');
+        return `${name} — ${msToHMS(m.ms)} (${m.sessions} sessions, ${m.rejoinCount || 0} rejoins)`;
+      });
       const fullText = lines.join('\n');
       embed.addFields({ name: 'Top members', value: fullText.slice(0, 1000) || '_No data_' });
       return interaction.reply({ embeds: [embed] });
@@ -1266,7 +1288,6 @@ function buildMonthlySummaryForKey(guildId, key) {
     }
   }
 
-  // ✅ FIXED: Correct JS syntax, includes tag fallback
   const members = Object.entries(perUser)
     .map(([uid, v]) => ({
       uid,
@@ -1389,20 +1410,20 @@ client.once('ready', async () => {
           // add only if missing in sheet
           if (!existingSet.has(user.id)) {
             rowsToAdd.push([
-              guild.id,                        // Guild ID
-              user.id,                         // User ID
-              user.tag || '',                  // Username
-              "SYSTEM (startup sync)",         // Moderator
-              ban.reason || "No reason",       // Reason
-              "Startup Sync",                  // BanType / Note
-              toMalaysiaTimeIso(new Date())    // Logged At
+              guild.id,
+              user.id,
+              user.tag || '',
+              "SYSTEM (startup sync)",
+              ban.reason || "No reason",
+              "Startup Sync",
+              toMalaysiaTimeIso(new Date())
             ]);
           }
         }
 
         if (rowsToAdd.length > 0) {
           for (const r of rowsToAdd) {
-            await appendAndSort("BanList", [r], 6); // sort by Logged At column
+            await appendAndSort("BanList", [r], 6);
           }
           console.log(`[Sheets] Synced ${rowsToAdd.length} startup bans for guild ${guild.name}`);
         }
@@ -1441,10 +1462,12 @@ const PORT = process.env.PORT || 3000;
 app.get('/', (_req, res) => res.send('🟢 BusyPang (Sheets) is running.'));
 app.listen(PORT, () => console.log(`✅ Web server running on port ${PORT}`));
 
-// keep Railway awake
+// keep Railway awake (or self host)
+const SELF_PING_URL = process.env.RAILWAY_STATIC_URL ? `https://${process.env.RAILWAY_STATIC_URL}/` : null;
 setInterval(() => {
   try {
-    fetch(`https://${process.env.RAILWAY_STATIC_URL || "localhost"}/`)
+    const target = SELF_PING_URL || `http://localhost:${PORT}/`;
+    fetch(target)
       .then(() => console.log("🔁 Self-ping OK"))
       .catch(() => console.warn("⚠️ Self-ping failed"));
   } catch (e) {
@@ -1457,5 +1480,3 @@ client.login(TOKEN).catch(err => {
   console.error('Failed to login:', err);   
   process.exit(1); 
 });
-
-// ------------------- End of file -------------------
