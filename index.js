@@ -86,8 +86,6 @@ async function syncExistingBansToSheet(guild) {
   }
 }
 
-const { google } = require('googleapis');
-
 // ------------------ Google Sheets ------------------
 const { google } = require('googleapis');
 
