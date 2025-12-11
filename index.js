@@ -179,6 +179,65 @@ async function ensureSheetExists(sheetTitle, headerRow = [], headerNote = '') {
   }
 }
 
+async function removeBanFromSheet(userId) {
+  const sheets = getSheetsClient();
+  if (!sheets) return;
+
+  try {
+    // Ensure sheet exists
+    const banSheetId = await getSheetId("BanList");
+    if (!banSheetId) {
+      console.warn("[Sheets] BanList sheet missing, cannot delete row.");
+      return;
+    }
+
+    // Fetch rows starting from row 3
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: "BanList!A3:G10000"
+    });
+
+    const rows = res.data.values || [];
+    const deleteRequests = [];
+    let rowIndex = 3; // actual sheet row index
+
+    for (const row of rows) {
+      const sheetUserId = row[1]; // user ID column
+      if (sheetUserId === userId) {
+        deleteRequests.push({
+          deleteDimension: {
+            range: {
+              sheetId: banSheetId,
+              dimension: "ROWS",
+              startIndex: rowIndex - 1,
+              endIndex: rowIndex
+            }
+          }
+        });
+      }
+      rowIndex++;
+    }
+
+    if (deleteRequests.length > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: GOOGLE_SHEET_ID,
+        requestBody: { requests: deleteRequests }
+      });
+      console.log(`[Sheets] Removed ban entries for User ID ${userId}`);
+    }
+
+  } catch (e) {
+    console.error("[Sheets] removeBanFromSheet error:", e);
+  }
+}
+
+async function getSheetId(title) {
+  const sheets = getSheetsClient();
+  const meta = await sheets.spreadsheets.get({ spreadsheetId: GOOGLE_SHEET_ID });
+  const sheet = meta.data.sheets.find(s => s.properties.title === title);
+  return sheet.properties.sheetId;
+}
+
 // Append and auto-sort (sort by column index; 0 == first data column we use 'Logged At')
 async function appendAndSort(sheetTitle, rows, sortColumnIndex = 0) {
   const sheets = getSheetsClient();
@@ -414,21 +473,53 @@ async function loadVCDataFromSheets() {
   } catch (e) {
     console.error('[Sheets] loadVCDataFromSheets ERROR:', e);
   }
-}
 
-// Load warn list for warnings history (WarnList!A:G)
-async function loadWarnsFromSheet() {
-  const rows = await readRange('WarnList', 'A2:G10000');
-  for (const r of rows) {
-    // guildId | userId | username | moderator | reason | warningCount | at
-    const gid = r[0];
-    const uid = r[1];
-    const count = Number(r[5] || 0);
-    if (!gid || !uid) continue;
-    const w = getGuildWarnings(gid);
-    w.set(uid, Math.max(w.get(uid) || 0, count));
+}
+async function removeWarnsFromSheet(userId, guildId) {
+  const sheets = getSheetsClient();
+  if (!sheets) return;
+
+  try {
+    const sheetId = await getSheetId("WarnList");
+    if (!sheetId) return;
+
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: GOOGLE_SHEET_ID,
+      range: "WarnList!A3:G10000"
+    });
+
+    const rows = res.data.values || [];
+    const deleteRequests = [];
+    let rowIndex = 3;
+
+    for (const row of rows) {
+      const gid = row[0];
+      const uid = row[1];
+      if (gid === guildId && uid === userId) {
+        deleteRequests.push({
+          deleteDimension: {
+            range: {
+              sheetId,
+              dimension: "ROWS",
+              startIndex: rowIndex - 1,
+              endIndex: rowIndex
+            }
+          }
+        });
+      }
+      rowIndex++;
+    }
+
+    if (deleteRequests.length > 0) {
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: GOOGLE_SHEET_ID,
+        requestBody: { requests: deleteRequests }
+      });
+      console.log(`[Sheets] Removed warns for ${userId} in guild ${guildId}`);
+    }
+  } catch (e) {
+    console.error("[Sheets] removeWarnsFromSheet error:", e);
   }
-  console.log('[Sheets] Loaded warnings into memory.');
 }
 
 // Load monthly summaries if present (Dashboard not required)
@@ -1148,24 +1239,41 @@ client.on('interactionCreate', async (interaction) => {
       return;
     }
 
-    // /pardon (unban by id)
-    if (cmd === 'pardon') {
-      if (!isAdmin(interaction)) return interaction.reply({ content: '⛔ Admin only.' });
-      const userId = interaction.options.getString('user_id');
-      const reason = interaction.options.getString('reason') || `Pardon by ${interaction.user.tag}`;
-      bannedUsers.delete(userId);
-      getGuildWarnings(guild.id).set(userId, 0);
-      try {
-        await guild.bans.remove(userId, reason);
-        let tag = userId;
-        try { const u = await client.users.fetch(userId); tag = u.tag || userId; } catch {}
-        await interaction.reply({ content: `✅ Pardoned **<@${userId}>** (${tag}). 📝 ${reason}` });
-      } catch (e) {
-        console.error('pardon error', e);
-        await interaction.reply({ content: '⚠️ Could not unban that user (maybe not banned?).' });
-      }
-      return;
-    }
+// /pardon (unban by id)
+if (cmd === 'pardon') {
+  if (!isAdmin(interaction)) 
+    return interaction.reply({ content: '⛔ Admin only.' });
+
+  const userId = interaction.options.getString('user_id');
+  const reason = interaction.options.getString('reason') || `Pardon by ${interaction.user.tag}`;
+
+  // Remove from memory
+  bannedUsers.delete(userId);
+  getGuildWarnings(guild.id).set(userId, 0);
+
+  // Remove from Google Sheets
+  await removeBanFromSheet(userId);
+  await removeWarnsFromSheet(userId, guild.id);   // ← THIS WAS MISSING
+
+  // Discord unban
+  try {
+    await guild.bans.remove(userId, reason);
+
+    let tag = userId;
+    try { 
+      const u = await client.users.fetch(userId); 
+      tag = u.tag || userId; 
+    } catch {}
+
+    return interaction.reply({
+      content: `🟢 **${tag}** has been pardoned.\n📝 ${reason}`
+    });
+
+  } catch (e) {
+    console.error('pardon error', e);
+    return interaction.reply({ content: '⚠️ Failed to unban this user (maybe not banned?).' });
+  }
+}
 
     // /banlist
     if (cmd === 'banlist') {
