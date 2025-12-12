@@ -837,6 +837,40 @@ function buildMemberCardEmbed(member, state = 'Joined') {
   return emb;
 }
 
+// ---------------- MEMBER JOIN ----------------
+client.on("guildMemberAdd", async (member) => {
+  try {
+    const guild = member.guild;
+
+    const embed = buildMemberCardEmbed(member, "Joined");
+
+    const logCh = guild.channels.cache.get(LOG_CHANNEL);
+    if (logCh) await logCh.send({ embeds: [embed] });
+
+    // Update region leaderboard immediately
+    updateRegionStats(guild);
+  } catch (e) {
+    console.error("[Join] Error:", e);
+  }
+});
+
+// ---------------- MEMBER LEAVE ----------------
+client.on("guildMemberRemove", async (member) => {
+  try {
+    const guild = member.guild;
+
+    const embed = buildMemberCardEmbed(member, "Left");
+
+    const logCh = guild.channels.cache.get(LOG_CHANNEL);
+    if (logCh) await logCh.send({ embeds: [embed] });
+
+    // Update region leaderboard immediately
+    updateRegionStats(guild);
+  } catch (e) {
+    console.error("[Leave] Error:", e);
+  }
+});
+
 // message keyword moderation (global 'global' keywords)
 client.on('messageCreate', async (message) => {
   try {
